@@ -45,6 +45,7 @@ body.login .userSelect:hover {
 
 body.login #handleEntryBlock,
 body.login #passwordEntryBlock,
+body.login #registerEntryBlock,
 body.login #passwordRecoveryBlock {
     margin: 2px;
 }

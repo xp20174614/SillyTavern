@@ -87,6 +87,7 @@ import { POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { compressRequest } from './request-compression.js';
+import { getCurrentUserHandle } from './user.js';
 
 export {
     selected_group,
@@ -118,6 +119,19 @@ let group_generation_id = null;
 let fav_grp_checked = false;
 let openGroupId = null;
 let newGroupMembers = [];
+const sharedRoomState = {
+    selectedRoomId: '',
+    currentRoom: null,
+    rooms: [],
+    users: [],
+    npcs: [],
+    seenMessageByRoom: {},
+    seenInitialized: false,
+    selectedNpcId: '',
+};
+let sharedRoomsPoller = null;
+let sharedRoomsPollingBusy = false;
+let sharedRoomsSidebarPoller = null;
 
 export const group_activation_strategy = {
     NATURAL: 0,
@@ -1881,6 +1895,9 @@ function select_group_chats(groupId, skipAnimation) {
     hideMutedSprites = group?.hideMutedSprites ?? false;
     $('#rm_group_hidemutedsprites').prop('checked', hideMutedSprites);
 
+    refreshSharedRooms();
+    refreshSharedNpcs();
+
     eventSource.emit('groupSelected', { detail: { id: openGroupId, group: group } });
 }
 
@@ -2128,6 +2145,614 @@ async function createGroup() {
         createTagMapFromList('#groupTagList', data.id);
         await getCharacters();
         select_rm_info('group_create', data.id);
+    }
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll('\'', '&#39;');
+}
+
+async function roomRequest(path, payload = {}) {
+    const response = await fetch(`/api/rooms/${path}`, {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+        let message = `Request failed (${response.status})`;
+        try {
+            const error = await response.json();
+            message = error?.error || message;
+        } catch {
+            // Ignore response parse errors.
+        }
+        throw new Error(message);
+    }
+    return response.json();
+}
+
+function getSelectedSharedRoomId() {
+    return String($('input[name="rm_shared_room_select"]:checked').val() || sharedRoomState.selectedRoomId || '').trim();
+}
+
+function getCheckedValues(selector, attr) {
+    return $(selector).map((_, el) => String($(el).attr(attr) || '').trim()).get().filter(Boolean);
+}
+
+function setSharedRoomBadge(room) {
+    if (!room) {
+        $('#rm_shared_room_current').text('-');
+        return;
+    }
+    $('#rm_shared_room_current').text(`${room.name} (${room.id})`);
+}
+
+function renderCurrentRoomNpcs(room) {
+    const container = $('#shared_rooms_current_npcs');
+    const hint = $('#shared_rooms_npc_target_hint');
+    if (!container.length || !hint.length) return;
+
+    container.empty();
+    const npcs = Array.isArray(room?.npcs) ? room.npcs : [];
+    const hasSelected = npcs.some((npc) => npc.id === sharedRoomState.selectedNpcId);
+    if (!hasSelected) {
+        sharedRoomState.selectedNpcId = '';
+    }
+
+    for (const npc of npcs) {
+        const row = $(`
+            <label class="shared_rooms_npc_item">
+                <input type="radio" name="shared_room_target_npc" />
+                <div class="checkbox_label" title="Auto reply">
+                    <input type="checkbox" class="shared_room_npc_auto_reply" />
+                    <span>Auto</span>
+                </div>
+                <span class="shared_rooms_sidebar_meta"></span>
+            </label>
+        `);
+        const selected = sharedRoomState.selectedNpcId === npc.id;
+        row.toggleClass('is_selected', selected);
+        row.find('input')
+            .val(npc.id)
+            .prop('checked', selected);
+        row.find('.shared_room_npc_auto_reply')
+            .attr('data-npc-id', npc.id)
+            .prop('checked', npc.autoReply !== false);
+        row.find('span').text(npc.name || npc.avatar || npc.id);
+        container.append(row);
+    }
+
+    const targetNpc = npcs.find((npc) => npc.id === sharedRoomState.selectedNpcId);
+    if (targetNpc) {
+        hint.text(`Selected NPC: ${targetNpc.name} (click to trigger reply)`);
+    } else {
+        hint.text('Click an NPC to make them reply');
+    }
+}
+
+function renderSharedRooms() {
+    const container = $('#rm_shared_rooms_list');
+    container.empty();
+    const selectedId = sharedRoomState.selectedRoomId;
+    for (const room of sharedRoomState.rooms) {
+        const row = $(`
+            <label class="rm_shared_item">
+                <input type="radio" name="rm_shared_room_select" />
+                <span class="flex1"></span>
+            </label>
+        `);
+        row.find('input')
+            .val(room.id)
+            .prop('checked', room.id === selectedId);
+        const joinedLabel = room.joined ? 'joined' : (room.visibility === 'public' ? 'public' : 'invite');
+        row.find('span').html(`${escapeHtml(room.name)} <small class="opacity70p">[${escapeHtml(room.id)} / ${escapeHtml(joinedLabel)}]</small>`);
+        container.append(row);
+    }
+}
+
+function renderSharedUsers() {
+    const container = $('#rm_shared_users_list');
+    container.empty();
+    for (const user of sharedRoomState.users) {
+        const row = $(`
+            <label class="rm_shared_item">
+                <input type="checkbox" class="rm_shared_user_check" />
+                <span class="flex1"></span>
+            </label>
+        `);
+        row.find('input').attr('data-handle', user.handle);
+        row.find('span').html(`${escapeHtml(user.name || user.handle)} <small class="opacity70p">@${escapeHtml(user.handle)}</small>`);
+        container.append(row);
+    }
+}
+
+function renderSharedNpcs() {
+    const container = $('#rm_shared_npcs_list');
+    container.empty();
+    for (const npc of sharedRoomState.npcs) {
+        const row = $(`
+            <label class="rm_shared_item">
+                <input type="checkbox" class="rm_shared_npc_check" />
+                <span class="flex1"></span>
+            </label>
+        `);
+        row.find('input')
+            .attr('data-owner', npc.ownerHandle)
+            .attr('data-avatar', npc.avatar)
+            .attr('data-name', npc.name);
+        row.find('span').html(`${escapeHtml(npc.name)} <small class="opacity70p">${escapeHtml(npc.ownerHandle)} / ${escapeHtml(npc.avatar)}</small>`);
+        container.append(row);
+    }
+}
+
+function mapSharedRoomMessageToChat(message) {
+    const isUser = message.role === 'user';
+    return {
+        is_user: isUser,
+        is_system: false,
+        name: message.actorName || message.actorId || (isUser ? 'User' : 'Assistant'),
+        mes: String(message.text || ''),
+        send_date: getMessageTimeStamp(),
+        force_avatar: default_avatar,
+        original_avatar: 'none',
+        extra: {
+            isSharedRoom: true,
+            sharedRoomActorId: message.actorId,
+            sharedRoomMessageId: message.id,
+        },
+    };
+}
+
+async function renderSharedMessages(room) {
+    const messages = Array.isArray(room?.messages) ? room.messages : [];
+    const mapped = messages.slice(-180).map(mapSharedRoomMessageToChat);
+    await clearChat({ clearData: true });
+    chat.splice(0, chat.length, ...mapped);
+    await printMessages();
+
+    const header = $('#rm_button_selected_ch').children('h2');
+    if (header.length) {
+        header.text(`[Shared] ${room.name}`);
+    }
+
+    const textarea = $('#send_textarea');
+    textarea.attr('placeholder', `Send to shared room: ${room.name}`);
+    textarea.attr('data-shared-room-active', 'true');
+}
+
+function renderSharedRoomsSidebar() {
+    const createdContainer = $('#shared_rooms_created_list');
+    const joinedContainer = $('#shared_rooms_joined_list');
+    if (!createdContainer.length || !joinedContainer.length) {
+        return;
+    }
+
+    const myHandle = getCurrentUserHandle();
+    const rooms = Array.isArray(sharedRoomState.rooms) ? sharedRoomState.rooms : [];
+    const createdRooms = rooms.filter((room) => room.ownerHandle === myHandle);
+    const joinedRooms = rooms.filter((room) => room.joined && room.ownerHandle !== myHandle);
+
+    const renderOne = (container, list) => {
+        container.empty();
+        for (const room of list) {
+            const unread = room.joined && sharedRoomState.seenMessageByRoom[room.id] !== room.lastMessageId && room.lastMessageId ? 1 : 0;
+            const isSelected = room.id === sharedRoomState.selectedRoomId;
+            const row = $(`
+                <div class="shared_rooms_sidebar_item">
+                    <div class="shared_rooms_sidebar_meta"></div>
+                    <div class="shared_rooms_sidebar_actions">
+                        <div class="shared_rooms_sidebar_unread"></div>
+                        <div class="menu_button fa-solid fa-right-to-bracket"></div>
+                        <div class="menu_button fa-solid fa-arrow-up-right-from-square"></div>
+                    </div>
+                </div>
+            `);
+            row.toggleClass('is_selected', isSelected);
+            row.attr('data-room-id', room.id);
+            row.find('.shared_rooms_sidebar_meta').text(`${room.name} (${room.id})`);
+            row.find('.shared_rooms_sidebar_unread').text(unread > 0 ? '•' : '').toggle(unread > 0);
+            const joinBtn = row.find('.fa-right-to-bracket');
+            joinBtn.attr('data-room-id', room.id).attr('title', room.joined ? 'Already joined' : 'Join room');
+            joinBtn.toggle(!room.joined);
+            row.find('.fa-arrow-up-right-from-square').attr('data-room-id', room.id).attr('title', 'Open room');
+            container.append(row);
+        }
+    };
+
+    renderOne(createdContainer, createdRooms);
+    renderOne(joinedContainer, joinedRooms);
+}
+
+function renderSharedRoomsSidebarSelectors() {
+    const userSelect = $('#shared_rooms_sidebar_user_select');
+    const npcSelect = $('#shared_rooms_sidebar_npc_select');
+    if (!userSelect.length || !npcSelect.length) {
+        return;
+    }
+
+    const prevUserValue = String(userSelect.val() || '');
+    const prevNpcValue = String(npcSelect.val() || '');
+
+    const currentUser = getCurrentUserHandle();
+    const users = Array.isArray(sharedRoomState.users) ? sharedRoomState.users : [];
+    userSelect.empty();
+    userSelect.append('<option value="">Select user</option>');
+    for (const user of users) {
+        if (user.handle === currentUser) continue;
+        userSelect.append(`<option value="${escapeHtml(user.handle)}">${escapeHtml(user.name || user.handle)} (@${escapeHtml(user.handle)})</option>`);
+    }
+    if (prevUserValue && userSelect.find(`option[value="${prevUserValue}"]`).length) {
+        userSelect.val(prevUserValue);
+    }
+
+    const npcs = Array.isArray(sharedRoomState.npcs) ? sharedRoomState.npcs : [];
+    npcSelect.empty();
+    npcSelect.append('<option value="">Select NPC</option>');
+    for (const npc of npcs) {
+        npcSelect.append(`<option value="${escapeHtml(npc.ownerHandle)}::${escapeHtml(npc.avatar)}::${escapeHtml(npc.name || '')}">${escapeHtml(npc.name)} (${escapeHtml(npc.ownerHandle)})</option>`);
+    }
+    if (prevNpcValue && npcSelect.find(`option[value="${prevNpcValue}"]`).length) {
+        npcSelect.val(prevNpcValue);
+    }
+}
+
+async function refreshSharedRooms({ silent = false } = {}) {
+    try {
+        const [rooms, users] = await Promise.all([
+            roomRequest('list', {}),
+            roomRequest('discover-users', {}),
+        ]);
+        sharedRoomState.rooms = Array.isArray(rooms) ? rooms : [];
+        sharedRoomState.users = Array.isArray(users) ? users : [];
+        if (!sharedRoomState.seenInitialized) {
+            for (const room of sharedRoomState.rooms) {
+                if (room.joined) {
+                    sharedRoomState.seenMessageByRoom[room.id] = room.lastMessageId || '';
+                }
+            }
+            sharedRoomState.seenInitialized = true;
+        }
+        if (!sharedRoomState.selectedRoomId && sharedRoomState.rooms.length) {
+            sharedRoomState.selectedRoomId = sharedRoomState.rooms[0].id;
+        }
+        renderSharedRooms();
+        renderSharedRoomsSidebar();
+        renderSharedRoomsSidebarSelectors();
+        renderSharedUsers();
+    } catch (error) {
+        if (!silent) {
+            toastr.error(String(error.message || error), t`Shared rooms`);
+        }
+    }
+}
+
+async function openSharedRoomFromSidebar(roomId) {
+    const room = String(roomId || '').trim();
+    if (!room) return false;
+    sharedRoomState.selectedRoomId = room;
+    await refreshSharedRooms({ silent: true });
+    return await openSharedRoom(room);
+}
+
+function startSharedRoomsPolling() {
+    if (sharedRoomsPoller) return;
+    sharedRoomsPoller = setInterval(async () => {
+        if (sharedRoomsPollingBusy) return;
+        const sidebarVisible = $('#shared_rooms_sidebar').is(':visible');
+        if (!sidebarVisible) return;
+        sharedRoomsPollingBusy = true;
+        try {
+            await refreshSharedRooms({ silent: true });
+            await refreshCurrentSharedRoom({ silent: true });
+        } finally {
+            sharedRoomsPollingBusy = false;
+        }
+    }, 2000);
+}
+
+function startSharedRoomsSidebarPolling() {
+    if (sharedRoomsSidebarPoller) return;
+    sharedRoomsSidebarPoller = setInterval(async () => {
+        if (sharedRoomsPollingBusy) return;
+        sharedRoomsPollingBusy = true;
+        try {
+            await refreshSharedRooms({ silent: true });
+            await refreshSharedNpcs({ silent: true });
+        } finally {
+            sharedRoomsPollingBusy = false;
+        }
+    }, 4000);
+}
+
+async function refreshSharedNpcs({ silent = false } = {}) {
+    try {
+        const query = '';
+        const npcs = await roomRequest('discover-npcs', { scope: 'all', query });
+        sharedRoomState.npcs = Array.isArray(npcs) ? npcs.slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN')) : [];
+        renderSharedNpcs();
+        renderSharedRoomsSidebarSelectors();
+    } catch (error) {
+        if (!silent) {
+            toastr.error(String(error.message || error), t`Shared rooms`);
+        }
+    }
+}
+
+async function openSharedRoom(roomId) {
+    if (!roomId) {
+        toastr.warning(t`Please select a room first.`);
+        return false;
+    }
+    try {
+        const room = await roomRequest('get', { roomId });
+        sharedRoomState.currentRoom = room;
+        sharedRoomState.selectedRoomId = room.id;
+        sharedRoomState.seenMessageByRoom[room.id] = Array.isArray(room.messages) && room.messages.length ? room.messages[room.messages.length - 1].id : '';
+        if (!Array.isArray(room.npcs) || !room.npcs.some((npc) => npc.id === sharedRoomState.selectedNpcId)) {
+            sharedRoomState.selectedNpcId = '';
+        }
+        setSharedRoomBadge(room);
+        await renderSharedMessages(room);
+        renderCurrentRoomNpcs(room);
+        renderSharedRooms();
+        renderSharedRoomsSidebar();
+        return true;
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+        return false;
+    }
+}
+
+async function refreshCurrentSharedRoom({ silent = true } = {}) {
+    const roomId = sharedRoomState.currentRoom?.id;
+    if (!roomId) {
+        return;
+    }
+
+    const previousRoom = sharedRoomState.currentRoom;
+    const previousLastId = Array.isArray(previousRoom?.messages) && previousRoom.messages.length
+        ? previousRoom.messages[previousRoom.messages.length - 1].id
+        : '';
+    const previousUsersCount = Array.isArray(previousRoom?.users) ? previousRoom.users.length : 0;
+
+    try {
+        const room = await roomRequest('get', { roomId });
+        sharedRoomState.currentRoom = room;
+        sharedRoomState.selectedRoomId = room.id;
+        setSharedRoomBadge(room);
+
+        const nextLastId = Array.isArray(room?.messages) && room.messages.length
+            ? room.messages[room.messages.length - 1].id
+            : '';
+        const nextUsersCount = Array.isArray(room?.users) ? room.users.length : 0;
+        const shouldRender = previousLastId !== nextLastId || previousUsersCount !== nextUsersCount;
+        const npcChanged = (previousRoom?.npcs?.length || 0) !== (room?.npcs?.length || 0);
+
+        if (shouldRender || npcChanged) {
+            sharedRoomState.seenMessageByRoom[room.id] = nextLastId;
+            await renderSharedMessages(room);
+            renderCurrentRoomNpcs(room);
+            renderSharedRooms();
+            renderSharedRoomsSidebar();
+        }
+    } catch (error) {
+        if (!silent) {
+            toastr.error(String(error.message || error), t`Shared rooms`);
+        }
+    }
+}
+
+async function createSharedRoom() {
+    try {
+        const name = String($('#rm_shared_room_name').val() || '').trim();
+        const visibility = String($('#rm_shared_room_visibility').val() || 'invite');
+        const userHandles = getCheckedValues('.rm_shared_user_check:checked', 'data-handle');
+        const npcCards = $('.rm_shared_npc_check:checked').map((_, el) => ({
+            ownerHandle: String($(el).attr('data-owner') || ''),
+            avatar: String($(el).attr('data-avatar') || ''),
+            name: String($(el).attr('data-name') || ''),
+        })).get();
+        const room = await roomRequest('create', {
+            name,
+            visibility,
+            userHandles,
+            npcCards,
+        });
+        sharedRoomState.selectedRoomId = room.id;
+        await refreshSharedRooms();
+        await openSharedRoom(room.id);
+        toastr.success(t`Shared room created.`);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function joinSharedRoom() {
+    const roomId = getSelectedSharedRoomId();
+    if (!roomId) {
+        toastr.warning(t`Please select a room first.`);
+        return;
+    }
+    try {
+        await roomRequest('join', { roomId });
+        await refreshSharedRooms();
+        await openSharedRoom(roomId);
+        toastr.success(t`Joined room.`);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function inviteSharedRoomUsers() {
+    const roomId = getSelectedSharedRoomId() || sharedRoomState.currentRoom?.id;
+    if (!roomId) {
+        toastr.warning(t`Open a room first.`);
+        return;
+    }
+    const userHandles = getCheckedValues('.rm_shared_user_check:checked', 'data-handle');
+    if (!userHandles.length) {
+        toastr.warning(t`Please select at least one user.`);
+        return;
+    }
+    try {
+        await roomRequest('invite-users', { roomId, userHandles });
+        await openSharedRoom(roomId);
+        await refreshSharedRooms();
+        toastr.success(t`Users invited.`);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function addSharedRoomNpcs() {
+    const roomId = getSelectedSharedRoomId() || sharedRoomState.currentRoom?.id;
+    if (!roomId) {
+        toastr.warning(t`Open a room first.`);
+        return;
+    }
+    const npcCards = $('.rm_shared_npc_check:checked').map((_, el) => ({
+        ownerHandle: String($(el).attr('data-owner') || ''),
+        avatar: String($(el).attr('data-avatar') || ''),
+        name: String($(el).attr('data-name') || ''),
+    })).get();
+    if (!npcCards.length) {
+        toastr.warning(t`Please select at least one NPC card.`);
+        return;
+    }
+    try {
+        await roomRequest('add-npcs', { roomId, npcCards });
+        await openSharedRoom(roomId);
+        await refreshSharedRooms();
+        toastr.success(t`NPC cards added.`);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function sendSharedRoomMessage() {
+    const roomId = getSelectedSharedRoomId() || sharedRoomState.currentRoom?.id;
+    if (!roomId) {
+        toastr.warning(t`Open a room first.`);
+        return;
+    }
+    const text = String($('#send_textarea').val() || '').trim();
+    if (!text) {
+        return;
+    }
+    try {
+        await roomRequest('send', { roomId, text });
+        $('#send_textarea').val('');
+        $('#send_textarea')[0]?.dispatchEvent(new Event('input', { bubbles: true }));
+        await openSharedRoom(roomId);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function setSharedRoomNpcAutoReply(npcId, autoReply) {
+    const roomId = sharedRoomState.selectedRoomId || sharedRoomState.currentRoom?.id;
+    if (!roomId || !npcId) return;
+    try {
+        const room = await roomRequest('set-npc-auto-reply', { roomId, npcId, autoReply });
+        sharedRoomState.currentRoom = room;
+        renderCurrentRoomNpcs(room);
+        renderSharedRooms();
+        renderSharedRoomsSidebar();
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function nudgeSharedRoomNpc(npcId) {
+    const roomId = sharedRoomState.selectedRoomId || sharedRoomState.currentRoom?.id;
+    if (!roomId || !npcId) {
+        return;
+    }
+    try {
+        await roomRequest('nudge-npc', { roomId, npcId });
+        await openSharedRoom(roomId);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+function deactivateSharedRoomCenterMode() {
+    const textarea = $('#send_textarea');
+    textarea.attr('placeholder', textarea.attr('connected_text') || '');
+    textarea.removeAttr('data-shared-room-active');
+}
+
+async function handleSharedRoomCenterSend(event) {
+    if (!sharedRoomState.currentRoom?.id) {
+        return;
+    }
+    if (event) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        event.stopPropagation();
+    }
+    await sendSharedRoomMessage();
+}
+
+async function createSharedRoomFromSidebar() {
+    const name = String($('#shared_rooms_sidebar_room_name').val() || '').trim();
+    const visibility = String($('#shared_rooms_sidebar_visibility').val() || 'invite');
+    try {
+        const room = await roomRequest('create', { name, visibility, userHandles: [], npcCards: [] });
+        sharedRoomState.selectedRoomId = room.id;
+        $('#shared_rooms_sidebar_room_name').val('');
+        await refreshSharedRooms();
+        const opened = await openSharedRoomFromSidebar(room.id);
+        if (!opened) {
+            await roomRequest('join', { roomId: room.id });
+            await openSharedRoomFromSidebar(room.id);
+        }
+        toastr.success(t`Shared room created.`);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function inviteSharedRoomUserFromSidebar() {
+    const roomId = sharedRoomState.selectedRoomId || sharedRoomState.currentRoom?.id;
+    const handle = String($('#shared_rooms_sidebar_user_select').val() || '').trim();
+    if (!roomId) return toastr.warning(t`Select a room first.`);
+    if (!handle) return toastr.warning(t`Select a user first.`);
+    try {
+        await roomRequest('invite-users', { roomId, userHandles: [handle] });
+        await refreshSharedRooms();
+        await openSharedRoom(roomId);
+        toastr.success(t`User invited.`);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
+    }
+}
+
+async function addSharedRoomNpcFromSidebar() {
+    const roomId = sharedRoomState.selectedRoomId || sharedRoomState.currentRoom?.id;
+    let raw = String($('#shared_rooms_sidebar_npc_select').val() || '');
+    if (!roomId) return toastr.warning(t`Select a room first.`);
+    if (!raw) {
+        await refreshSharedNpcs({ silent: false });
+        raw = String($('#shared_rooms_sidebar_npc_select').val() || '');
+    }
+    if (!raw) return toastr.warning(t`No NPC cards found yet, try refresh once.`);
+    const [ownerHandle, avatar, name] = raw.split('::');
+    try {
+        await roomRequest('add-npcs', {
+            roomId,
+            npcCards: [{ ownerHandle, avatar, name }],
+        });
+        await refreshSharedRooms();
+        await openSharedRoom(roomId);
+        toastr.success(t`NPC added.`);
+    } catch (error) {
+        toastr.error(String(error.message || error), t`Shared rooms`);
     }
 }
 
@@ -2487,4 +3112,81 @@ jQuery(() => {
     $('#group_avatar_button').on('input', uploadGroupAvatar);
     $('#rm_group_restore_avatar').on('click', restoreGroupAvatar);
     $(document).on('click', '.group_member .right_menu_button', onGroupActionClick);
+    $(document).on('change', 'input[name="rm_shared_room_select"]', function () {
+        sharedRoomState.selectedRoomId = String($(this).val() || '');
+    });
+    $('#shared_rooms_sidebar_refresh').on('click', async () => {
+        await refreshSharedRooms();
+        await refreshSharedNpcs();
+    });
+    $('#shared_rooms_sidebar_npc_select').on('mousedown focus', async () => {
+        const optionCount = $('#shared_rooms_sidebar_npc_select option').length;
+        if (optionCount <= 1) {
+            await refreshSharedNpcs({ silent: false });
+        }
+    });
+    $('#shared_rooms_sidebar_create').on('click', createSharedRoomFromSidebar);
+    $('#shared_rooms_sidebar_invite').on('click', inviteSharedRoomUserFromSidebar);
+    $('#shared_rooms_sidebar_add_npc').on('click', addSharedRoomNpcFromSidebar);
+    $(document).on('change', 'input[name="shared_room_target_npc"]', function () {
+        sharedRoomState.selectedNpcId = String($(this).val() || '');
+        renderCurrentRoomNpcs(sharedRoomState.currentRoom);
+    });
+    $(document).on('click', '.shared_room_npc_auto_reply', function (event) {
+        event.stopPropagation();
+    });
+    $(document).on('change', '.shared_room_npc_auto_reply', async function (event) {
+        event.stopPropagation();
+        const npcId = String($(this).attr('data-npc-id') || '');
+        const autoReply = $(this).prop('checked');
+        await setSharedRoomNpcAutoReply(npcId, autoReply);
+    });
+    $(document).on('click', '.shared_rooms_npc_item', async function (event) {
+        if (!sharedRoomState.currentRoom?.id) return;
+        const npcId = String($(this).find('input[name="shared_room_target_npc"]').val() || '');
+        if (!npcId) return;
+        sharedRoomState.selectedNpcId = npcId;
+        renderCurrentRoomNpcs(sharedRoomState.currentRoom);
+        await nudgeSharedRoomNpc(npcId);
+        event.preventDefault();
+    });
+    $(document).on('click', '.shared_rooms_sidebar_item', function (event) {
+        if ($(event.target).closest('.menu_button').length) return;
+        const roomId = String($(this).attr('data-room-id') || '');
+        sharedRoomState.selectedRoomId = roomId;
+        renderSharedRoomsSidebar();
+    });
+    $(document).on('click', '.shared_rooms_sidebar_item .fa-right-to-bracket', async function (event) {
+        event.stopPropagation();
+        const roomId = String($(this).attr('data-room-id') || '');
+        if (!roomId) return;
+        try {
+            await roomRequest('join', { roomId });
+            sharedRoomState.selectedRoomId = roomId;
+            await refreshSharedRooms();
+            await openSharedRoomFromSidebar(roomId);
+        } catch (error) {
+            toastr.error(String(error.message || error), t`Shared rooms`);
+        }
+    });
+    $(document).on('click', '.shared_rooms_sidebar_item .fa-arrow-up-right-from-square', async function (event) {
+        event.stopPropagation();
+        const roomId = String($(this).attr('data-room-id') || '');
+        await openSharedRoomFromSidebar(roomId);
+    });
+    $('#send_but').get(0)?.addEventListener('click', handleSharedRoomCenterSend, true);
+    $('#send_textarea').get(0)?.addEventListener('keydown', async (event) => {
+        if (!sharedRoomState.currentRoom?.id) return;
+        if (event.key === 'Enter' && !event.shiftKey) {
+            await handleSharedRoomCenterSend(event);
+        }
+    }, true);
+    $(document).on('click', '.character_select, .group_select, #rm_button_characters, #rm_button_back_from_group', () => {
+        sharedRoomState.currentRoom = null;
+        deactivateSharedRoomCenterMode();
+    });
+    startSharedRoomsPolling();
+    startSharedRoomsSidebarPolling();
+    refreshSharedRooms({ silent: true });
+    refreshSharedNpcs();
 });
