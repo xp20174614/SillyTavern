@@ -2,6 +2,40 @@
 
 记录本项目将 SillyTavern 改造为多人同房聊天室的版本演进。格式参考 [Keep a Changelog](https://keepachangelog.com/)，迭代计划见 [ITERATION_PLAN.md](./ITERATION_PLAN.md)。
 
+## [SillyRoom 0.8.0] — 2026-09-07
+
+### 迭代 P3-2：安全加固（Origin 校验 + 限频参数化 + 部署指引）
+
+**改动内容**
+- `plugins/sillyroom/index.mjs`（唯一代码文件，核心文件零改动）：
+  - **Origin 校验（CSWSH 防护）**：WebSocket 升级链路最前端新增 `isOriginAllowed()`——① 无 `Origin` 头（非浏览器客户端：curl/Node 脚本/集成测试）放行，既有工具链零影响；② 与请求 `Host` 同源放行（比较 `host:port`，协议默认端口归一化 http→80/https→443；`Host` 不带端口按「经 80/443 默认端口或 TLS 终结代理到达」处理，两种默认端口均接受）；③ 命中 `SILLYROOM_ALLOWED_ORIGINS` 白名单放行（精确来源如 `https://chat.example.com` 锁定端口；裸主机名如 `myhost` 匹配该主机任意端口；`*` 全放行并告警）；其余一律 403 拒绝并记录原因（`cross-origin`/`malformed-origin`/`unsupported-origin-scheme` 等稳定标识）。同源比较忽略 scheme——浏览器混合内容规则本就禁止 ws/wss 跨 scheme 混用
+  - **限额全面环境变量化**：消息长度、昵称长度、每房人数、房间数、历史条数、限频窗口与上限、心跳间隔、单帧上限共 9 个 `SILLYROOM_*` 环境变量（`envLimit()` 统一实现：未设置用默认、非法值告警回退、越界钳位），启动日志打印全部生效值；`hello.limits` 自动跟随（前端兼容字段不变）
+  - 启动日志新增 origin 策略行（`same-origin only` / `+ N allowlisted` / `allow-all (*)`）
+- `plugins/sillyroom/SECURITY.md`（新增，部署安全指引）：明文存储限制、内置防护一览表、环境变量参考表（含「调低限频会影响离线补发」的耦合提示）、Origin 判定规则与反向代理注意点（nginx 默认保留 Host 无需白名单 / 改写 Host 必须配白名单 / Docker 端口映射直连同源）、公网上线检查清单、已知边界
+- `ITERATION_PLAN.md` / `CHANGELOG.md`：状态与记录更新（`.gitignore` 含 `/plugins/`，SECURITY.md 按 index.mjs 先例 `git add -f` 纳入）
+
+**改动原因**
+P1-2 完成了「未登录不能连」，但浏览器侧仍存在跨站 WebSocket 劫持面：恶意网页可借访问者的浏览器向本端点发起 WS 握手（单用户模式下可匿名旁观/冒名发言，多用户模式下借 cookie 会话）。同时全部运行限额硬编码在源码里，部署方无法按机器规格调整。本迭代补上浏览器来源信任边界（Origin 同源校验 + 代理白名单出口），并把限额开放为环境变量、沉淀部署安全文档。
+
+**测试结果**
+- `node --check` 通过；服务端启动正常，日志明示 origin 策略与限额生效值
+- **Node 集成测试 33/33 通过**（测试实例 :8001 / `--dataRoot data-test`，原始 socket 升级探针 + ws 客户端）：
+  - Origin 矩阵 13/13：无 Origin/同源 http/同源跨 scheme 同端口/无端口 Host 配 80、443 默认 → 101；异主机/同端口异主机/子域仿冒/`null`/畸形/`ftp:` scheme/无端口 Host 配非默认端口/默认端口路径异主机 → 403 ✓
+  - 白名单 6/6（`https://good.example.com,myhost`）：精确来源放行、**同主机异端口拒绝**（本测试抓出并修复一个真实 bug：带 scheme 的条目曾被误当裸主机名放行任意端口）、裸主机任意端口放行、裸主机不匹配子域、未列出来源拒绝、无 Origin 放行 ✓
+  - 通配符 1/1：`SILLYROOM_ALLOWED_ORIGINS="*"` 任意 Origin 放行 ✓
+  - 限额参数化 7/7（`RATE_LIMIT_MAX=3 MAX_MEMBERS=2 MAX_MESSAGE_CHARS=100`）：hello.limits 反映 env、第 3 人进满房被拒、窗口内第 4 条被限频、前 3 条正常广播、超长消息截断至 100 ✓
+  - 默认回归 6/6：默认限额值（32 人/2000 字符）、进房/回显/双客户端广播互通（id 一致）✓
+- **双浏览器标签页实测**（测试实例 :8001，真实浏览器 WS 握手必带 `Origin: http://localhost:8001`）：
+  - 两窗口状态灯均 `ok`（同源放行路径端到端验证）；A 进 p32test 发消息 → B 历史回放可见 + 成员数实时为 2（含「（我）」标记）；B 回复 → A 实时收到 + 「加入了房间」系统行 ✓
+  - 两窗口稳态 JS 错误钩子捕获 0 错误；服务端日志无 SillyRoom 拒绝/错误记录；截图确认窗口渲染正常 ✓
+- 测试服务器已停止，`data-test/`、临时测试脚本、测试标签页均已清理；`docker/docker-compose.yml` 的工作区改动仍为本机部署配置，未纳入提交
+
+**已知边界（记录为后续迭代项）**
+- 无 `Origin` 头的客户端不做来源校验：多用户模式下仍受 P1-2 会话鉴权保护；单用户模式下维持 0.1.0 以来「本机部署假设」的行为（已在 SECURITY.md 明示，公网部署须开多用户模式）
+- 白名单匹配忽略 scheme（`host:port` 粒度）：`http://` 与 `https://` 的同主机同端口条目等效——浏览器混合内容规则使跨 scheme 伪造握手不可行，实际风险可忽略
+- `SILLYROOM_ALLOWED_ORIGINS` 在模块加载时读取一次，运行中修改需重启进程
+- 前端离线补发上限固定 15 条并按默认限频校准；`SILLYROOM_RATE_LIMIT_MAX` 调低后补发可能被限频拒绝（消息保留缓存等待重连窗口，已写入 SECURITY.md）
+
 ## [SillyRoom 0.7.0] — 2026-09-07
 
 ### 迭代 P2-3：主题与 i18n 打磨

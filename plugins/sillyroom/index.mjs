@@ -33,19 +33,50 @@ export const info = {
 
 const WS_PATH = '/api/plugins/sillyroom/ws';
 
-const MAX_MESSAGE_LENGTH = 2000;
-const MAX_NAME_LENGTH = 24;
-const MAX_ROOM_ID_LENGTH = 32;
-const MAX_MEMBERS_PER_ROOM = 32;
-const MAX_ROOMS = 100;
-const HISTORY_LIMIT = 50;
+// P3-2: operational limits are parameterized via SILLYROOM_* environment
+// variables so deployments can tune them without code changes. Values are
+// clamped to sane bounds; missing or invalid input falls back to the default.
+function envLimit(name, defaultValue, min, max) {
+    const raw = process.env[name];
+    if (raw === undefined || String(raw).trim() === '') {
+        return defaultValue;
+    }
+
+    const parsed = Number.parseInt(String(raw).trim(), 10);
+    if (!Number.isFinite(parsed)) {
+        console.warn(`SillyRoom: invalid ${name}="${raw}", falling back to default ${defaultValue}`);
+        return defaultValue;
+    }
+
+    return Math.min(max, Math.max(min, parsed));
+}
+
+const MAX_MESSAGE_LENGTH = envLimit('SILLYROOM_MAX_MESSAGE_CHARS', 2000, 100, 20000);
+const MAX_NAME_LENGTH = envLimit('SILLYROOM_MAX_NAME_CHARS', 24, 1, 64);
+const MAX_ROOM_ID_LENGTH = 32; // format contract shared with the persisted-file naming, kept fixed
+const MAX_MEMBERS_PER_ROOM = envLimit('SILLYROOM_MAX_MEMBERS', 32, 2, 256);
+const MAX_ROOMS = envLimit('SILLYROOM_MAX_ROOMS', 100, 1, 1000);
+const HISTORY_LIMIT = envLimit('SILLYROOM_HISTORY_LIMIT', 50, 1, 500);
 // P2-1: room history persists to <DATA_ROOT>/sillyroom/rooms/<roomId>.json so
 // chat survives restarts. Rooms are account-agnostic shared entities, so the
 // history lives in a shared folder rather than any per-user directory.
 const HISTORY_FLUSH_DEBOUNCE_MS = 1500;
-const RATE_WINDOW_MS = 5000;
-const RATE_MAX_MESSAGES = 15;
-const HEARTBEAT_INTERVAL_MS = 30000;
+const RATE_WINDOW_MS = envLimit('SILLYROOM_RATE_LIMIT_WINDOW_MS', 5000, 1000, 600000);
+const RATE_MAX_MESSAGES = envLimit('SILLYROOM_RATE_LIMIT_MAX', 15, 1, 1000);
+const HEARTBEAT_INTERVAL_MS = envLimit('SILLYROOM_HEARTBEAT_INTERVAL_MS', 30000, 5000, 600000);
+const MAX_FRAME_BYTES = envLimit('SILLYROOM_MAX_FRAME_BYTES', 64 * 1024, 4096, 1024 * 1024);
+
+// P3-2: cross-site WebSocket hijacking guard. Browsers always attach an Origin
+// header to WebSocket handshakes; a malicious page must not be able to open a
+// socket to this endpoint riding on the visitor's cookies. Non-browser clients
+// (curl, integration tests, custom tools) send no Origin and stay unaffected.
+// SILLYROOM_ALLOWED_ORIGINS (comma-separated) adds exceptions for reverse-proxy
+// deployments where the externally visible origin differs from the internal
+// Host header; "*" allows everything (discouraged, logged as such at startup).
+const ALLOWED_ORIGINS = String(process.env.SILLYROOM_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map(entry => entry.trim().toLowerCase())
+    .filter(Boolean);
 
 const CLIENT_ID_PATTERN = /^[a-zA-Z0-9_-]{4,64}$/;
 const ROOM_ID_PATTERN = /^[a-zA-Z0-9_-]{1,32}$/;
@@ -530,6 +561,94 @@ function resolveAccountDisplayName(user, directories) {
     return sanitizeText(user?.name, MAX_NAME_LENGTH);
 }
 
+function originHostKey(hostname, port, defaultPort) {
+    const normalizedPort = port === '' ? defaultPort : Number(port);
+    return `${String(hostname).toLowerCase()}:${normalizedPort}`;
+}
+
+/**
+ * P3-2: decides whether an upgrade request's Origin is acceptable — the guard
+ * against cross-site WebSocket hijacking (a hostile page opening a socket with
+ * the visitor's browser and cookies). Allowed when any of:
+ *   1. no Origin header (non-browser client),
+ *   2. allowlist contains "*",
+ *   3. Origin hits SILLYROOM_ALLOWED_ORIGINS (exact origins or bare host[:port];
+ *      a bare host matches any port on that host),
+ *   4. Origin is same-origin with the request's Host header. Comparison is on
+ *      host:port with protocol default ports implied (http→80, https→443). A
+ *      Host header without a port means the request arrived via a default-port
+ *      path (direct :80/:443 or a TLS-terminating proxy), so either default is
+ *      accepted in that case.
+ * @param {import('node:http').IncomingMessage} request The HTTP upgrade request
+ * @returns {{allowed: boolean, reason: string}} Rejection reasons are stable identifiers for the log
+ */
+function isOriginAllowed(request) {
+    const originHeader = String(request.headers.origin ?? '').trim();
+    if (!originHeader) {
+        return { allowed: true, reason: 'no-origin' };
+    }
+
+    if (ALLOWED_ORIGINS.includes('*')) {
+        return { allowed: true, reason: 'allow-all' };
+    }
+
+    let originKey = null;
+    try {
+        const url = new URL(originHeader);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+            return { allowed: false, reason: 'unsupported-origin-scheme' };
+        }
+        originKey = originHostKey(url.hostname, url.port, url.protocol === 'https:' ? 443 : 80);
+    } catch {
+        return { allowed: false, reason: 'malformed-origin' };
+    }
+
+    for (const entry of ALLOWED_ORIGINS) {
+        try {
+            // Bare-host entries (no scheme) match any port on that host;
+            // entries with a scheme pin the port (default per scheme when omitted)
+            const hasScheme = entry.includes('://');
+            const url = new URL(hasScheme ? entry : `http://${entry}`);
+            if (!url.hostname) {
+                continue;
+            }
+            if (!hasScheme && url.port === '') {
+                if (originKey.startsWith(`${url.hostname.toLowerCase()}:`)) {
+                    return { allowed: true, reason: 'allowlisted' };
+                }
+            } else if (originHostKey(url.hostname, url.port, url.protocol === 'https:' ? 443 : 80) === originKey) {
+                return { allowed: true, reason: 'allowlisted' };
+            }
+        } catch {
+            // malformed allowlist entry; ignore it
+        }
+    }
+
+    const hostHeader = String(request.headers.host ?? '').trim();
+    if (!hostHeader) {
+        return { allowed: false, reason: 'missing-host-header' };
+    }
+
+    try {
+        // Parsed via URL for IPv6-literal Host headers; scheme is irrelevant
+        // (browsers cannot mix ws/wss across schemes due to mixed-content rules)
+        const hostUrl = new URL(`http://${hostHeader}`);
+        if (hostUrl.hostname && hostUrl.port === '') {
+            const [originHost, originPort] = originKey.split(':');
+            const matchesDefaultPortPath = originHost === hostUrl.hostname.toLowerCase() && (originPort === '80' || originPort === '443');
+            return matchesDefaultPortPath
+                ? { allowed: true, reason: 'same-origin' }
+                : { allowed: false, reason: 'cross-origin' };
+        }
+
+        return originHostKey(hostUrl.hostname, hostUrl.port, 80) === originKey
+            ? { allowed: true, reason: 'same-origin' }
+            : { allowed: false, reason: 'cross-origin' };
+    } catch {
+        return { allowed: false, reason: 'malformed-host-header' };
+    }
+}
+
 /**
  * P1-2: verifies that an upgrade request carries a valid SillyTavern login
  * session. Runs the same cookie-session middleware as the main app against a
@@ -714,7 +833,7 @@ export function initSocket(servers) {
         console.error('SillyRoom: failed to create history directory', error);
     }
 
-    wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+    wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
     wss.on('connection', handleConnection);
 
     // P1-2: build a session verifier identical to the main app's. Verification
@@ -738,6 +857,16 @@ export function initSocket(servers) {
             }
 
             if (pathname === WS_PATH) {
+                // P3-2: origin check runs before anything else — it is cheap
+                // and must gate even the session-authenticated path
+                const originCheck = isOriginAllowed(request);
+                if (!originCheck.allowed) {
+                    console.log(`SillyRoom: rejected WebSocket upgrade (${originCheck.reason}) origin="${String(request.headers.origin ?? '').slice(0, 200)}"`);
+                    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+                    socket.destroy();
+                    return;
+                }
+
                 if (!sessionMiddleware) {
                     // Single-user mode: no login requirement, behave as before
                     wss.handleUpgrade(request, socket, head, ws => {
@@ -773,7 +902,13 @@ export function initSocket(servers) {
     heartbeatTimer.unref?.();
 
     const authMode = sessionMiddleware ? 'session authentication enforced' : 'no authentication (single-user mode)';
-    console.log(`SillyRoom: WebSocket endpoint ready at ${WS_PATH} (${authMode}), history persisted in ${roomsDir()}`);
+    const originPolicy = ALLOWED_ORIGINS.includes('*')
+        ? 'origins: allow-all (*)'
+        : ALLOWED_ORIGINS.length
+            ? `origins: same-origin + ${ALLOWED_ORIGINS.length} allowlisted`
+            : 'origins: same-origin only';
+    console.log(`SillyRoom: WebSocket endpoint ready at ${WS_PATH} (${authMode}, ${originPolicy}), history persisted in ${roomsDir()}`);
+    console.log(`SillyRoom: limits — messages ${RATE_MAX_MESSAGES}/${Math.round(RATE_WINDOW_MS / 1000)}s, ${MAX_MESSAGE_LENGTH} chars/msg, ${MAX_MEMBERS_PER_ROOM} members/room, ${MAX_ROOMS} rooms, history ${HISTORY_LIMIT}, frame ${MAX_FRAME_BYTES} B`);
 }
 
 /**
