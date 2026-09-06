@@ -199,6 +199,12 @@ export class ServerStartup {
     constructor(app, cliArgs) {
         this.app = app;
         this.cliArgs = cliArgs;
+        /**
+         * HTTP(S) server instances created during startup (one per enabled IP protocol).
+         * Exposed so plugins can attach to them, e.g. for WebSocket upgrades.
+         * @type {import('node:http').Server[]}
+         */
+        this.servers = [];
     }
 
     /**
@@ -281,6 +287,7 @@ export class ServerStartup {
                 passphrase: String(this.cliArgs.keyPassphrase ?? ''),
             };
             const server = https.createServer(sslOptions, this.app);
+            this.servers.push(server);
             server.on('error', reject);
             server.on('listening', resolve);
 
@@ -304,6 +311,7 @@ export class ServerStartup {
     #createHttpServer(url, ipVersion) {
         return new Promise((resolve, reject) => {
             const server = http.createServer(this.app);
+            this.servers.push(server);
             server.on('error', reject);
             server.on('listening', resolve);
 

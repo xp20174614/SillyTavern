@@ -23,7 +23,7 @@ import './fetch-patch.js';
 import { serverDirectory } from './server-directory.js';
 
 import { serverEvents, EVENT_NAMES } from './server-events.js';
-import { loadPlugins } from './plugin-loader.js';
+import { loadPlugins, initPluginSockets } from './plugin-loader.js';
 import {
     initUserStorage,
     getCookieSecret,
@@ -356,9 +356,15 @@ async function preSetupTasks() {
 /**
  * Tasks that need to be run after the server starts listening.
  * @param {import('./server-startup.js').ServerStartupResult} result The result of the server startup
+ * @param {import('./server-startup.js').ServerStartup} [startup] The startup instance holding the listening servers
  * @returns {Promise<void>}
  */
-async function postSetupTasks(result) {
+async function postSetupTasks(result, startup = null) {
+    // Hand the listening HTTP(S) servers to plugins that requested socket access (e.g. for WebSocket upgrades)
+    if (startup && Array.isArray(startup.servers) && startup.servers.length > 0) {
+        await initPluginSockets(startup.servers);
+    }
+
     const browserLaunchHostname = await cliArgs.getBrowserLaunchHostname(result);
     const browserLaunchUrl = cliArgs.getBrowserLaunchUrl(browserLaunchHostname);
     const browserLaunchApp = String(getConfigValue('browserLaunch.browser', 'default') ?? '');
@@ -485,5 +491,7 @@ initUserStorage(globalThis.DATA_ROOT)
     .then(verifySecuritySettings)
     .then(preSetupTasks)
     .then(apply404Middleware)
-    .then(() => new ServerStartup(app, cliArgs).start())
-    .then(postSetupTasks);
+    .then(() => {
+        const startup = new ServerStartup(app, cliArgs);
+        return startup.start().then(result => postSetupTasks(result, startup));
+    });

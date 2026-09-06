@@ -89,6 +89,32 @@ export async function loadPlugins(app, pluginsPath) {
     }
 }
 
+/**
+ * Gives loaded plugins access to the underlying HTTP(S) server instances once they started
+ * listening. Plugins can opt in by exporting an `initSocket(servers)` function, e.g. to attach
+ * WebSocket upgrade handlers to the servers.
+ * @param {import('node:http').Server[]} servers Array of listening HTTP(S) server instances
+ * @returns {Promise<void>}
+ */
+export async function initPluginSockets(servers) {
+    if (!enableServerPlugins || !Array.isArray(servers) || servers.length === 0) {
+        return;
+    }
+
+    for (const plugin of loadedPlugins.values()) {
+        const initSocket = plugin?.initSocket ?? plugin?.default?.initSocket;
+        if (typeof initSocket !== 'function') {
+            continue;
+        }
+
+        try {
+            await initSocket(servers);
+        } catch (error) {
+            console.error('Failed to initialize socket for plugin.', error);
+        }
+    }
+}
+
 async function loadFromDirectory(app, pluginDirectoryPath, exitHooks) {
     const files = fs.readdirSync(pluginDirectoryPath);
 
@@ -233,8 +259,7 @@ async function initPlugin(app, plugin, exitHooks) {
 /**
  * Automatically update all git plugins in the ./plugins directory
  * @param {string} pluginsPath Path to plugins directory
- */
-async function updatePlugins(pluginsPath) {
+ */async function updatePlugins(pluginsPath) {
     if (!enableServerPluginsAutoUpdate) {
         return;
     }
