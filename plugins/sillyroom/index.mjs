@@ -194,7 +194,9 @@ function leaveRoom(ws) {
 
     room.members.delete(ws);
     broadcast(room, { type: 'member_left', room: room.id, clientId: ws.member.clientId });
-    broadcast(room, { type: 'system', room: room.id, text: `${ws.member.name} 离开了房间`, ts: Date.now() });
+    // P2-3: key+args let clients localize the event in their own UI language;
+    // text (Chinese) stays as the legacy/fallback rendering.
+    broadcast(room, { type: 'system', room: room.id, key: 'member_left', args: { name: ws.member.name }, text: `${ws.member.name} 离开了房间`, ts: Date.now() });
     broadcast(room, { type: 'members', room: room.id, members: membersList(room) });
 
     ws.room = null;
@@ -381,7 +383,7 @@ function handleJoin(ws, payload) {
     }
 
     if (!rooms.has(roomId) && rooms.size >= MAX_ROOMS) {
-        send(ws, { type: 'error', message: '服务器房间数量已达上限，请稍后再试' });
+        send(ws, { type: 'error', key: 'err_rooms_limit', message: '服务器房间数量已达上限，请稍后再试' });
         return;
     }
 
@@ -394,7 +396,7 @@ function handleJoin(ws, payload) {
     }
 
     if (room.members.size >= MAX_MEMBERS_PER_ROOM) {
-        send(ws, { type: 'error', message: `房间 ${roomId} 人数已满（${MAX_MEMBERS_PER_ROOM} 人）` });
+        send(ws, { type: 'error', key: 'err_room_full', args: { room: roomId, max: MAX_MEMBERS_PER_ROOM }, message: `房间 ${roomId} 人数已满（${MAX_MEMBERS_PER_ROOM} 人）` });
         return;
     }
 
@@ -418,18 +420,18 @@ function handleJoin(ws, payload) {
     });
 
     broadcast(room, { type: 'member_joined', room: room.id, member: { clientId, name, color } }, { except: ws });
-    broadcast(room, { type: 'system', room: room.id, text: `${name} 加入了房间`, ts: Date.now() }, { except: ws });
+    broadcast(room, { type: 'system', room: room.id, key: 'member_joined', args: { name }, text: `${name} 加入了房间`, ts: Date.now() }, { except: ws });
     pushMembers(room);
 }
 
 function handleChat(ws, payload) {
     if (!ws.room || !ws.member) {
-        send(ws, { type: 'error', message: '请先加入房间后再发言' });
+        send(ws, { type: 'error', key: 'err_not_in_room', message: '请先加入房间后再发言' });
         return;
     }
 
     if (isRateLimited(ws)) {
-        send(ws, { type: 'error', message: '发言太快了，请稍作休息' });
+        send(ws, { type: 'error', key: 'err_rate_limited', message: '发言太快了，请稍作休息' });
         return;
     }
 
@@ -471,7 +473,7 @@ function handleChat(ws, payload) {
 
 function handleRename(ws, payload) {
     if (!ws.room || !ws.member) {
-        send(ws, { type: 'error', message: '请先加入房间' });
+        send(ws, { type: 'error', key: 'err_not_in_room', message: '请先加入房间' });
         return;
     }
 
@@ -482,7 +484,7 @@ function handleRename(ws, payload) {
 
     const oldName = ws.member.name;
     ws.member.name = name;
-    broadcast(ws.room, { type: 'system', room: ws.room.id, text: `${oldName} 改名为 ${name}`, ts: Date.now() });
+    broadcast(ws.room, { type: 'system', room: ws.room.id, key: 'member_renamed', args: { oldName, name }, text: `${oldName} 改名为 ${name}`, ts: Date.now() });
     pushMembers(ws.room);
 }
 
@@ -596,7 +598,7 @@ function onMessage(ws, raw) {
     try {
         payload = JSON.parse(String(raw));
     } catch {
-        send(ws, { type: 'error', message: '无效的消息格式' });
+        send(ws, { type: 'error', key: 'err_bad_message', message: '无效的消息格式' });
         return;
     }
 
@@ -620,7 +622,7 @@ function onMessage(ws, raw) {
             leaveRoom(ws);
             break;
         default:
-            send(ws, { type: 'error', message: '未知的消息类型' });
+            send(ws, { type: 'error', key: 'err_unknown_type', message: '未知的消息类型' });
     }
 }
 

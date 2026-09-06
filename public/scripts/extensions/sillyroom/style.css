@@ -14,7 +14,7 @@
     color: var(--SmartThemeBodyColor, #dcdde1);
     border: 1px solid var(--SmartThemeBorderColor, #3a3d44);
     border-radius: 10px;
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 8px 28px var(--SmartThemeShadowColor, rgba(0, 0, 0, 0.45));
     z-index: 30000;
     overflow: hidden;
     font-size: calc(var(--fontSizeBase, 15px) * 0.9);
@@ -55,15 +55,15 @@
 }
 
 #sillyroom_status_dot.ok {
-    background-color: #3fbf5a;
+    background-color: var(--active, #3fbf5a);
 }
 
 #sillyroom_status_dot.connecting {
-    background-color: #e5b93d;
+    background-color: var(--golden, #e5b93d);
 }
 
 #sillyroom_status_dot.error {
-    background-color: #e5424d;
+    background-color: var(--warning, #e5424d);
 }
 
 .sillyroom_icon {
@@ -140,7 +140,7 @@
 }
 
 .sillyroom_room_chip:hover {
-    background-color: var(--SmartThemeChatTintColor, rgba(255, 255, 255, 0.06));
+    background-color: color-mix(in srgb, var(--SmartThemeBodyColor, #dcdde1) 12%, transparent);
 }
 
 #sillyroom_toggles {
@@ -172,7 +172,7 @@
     font-weight: 700;
     padding: 0 5px;
     border-radius: 8px;
-    background-color: var(--SmartThemeChatTintColor, rgba(255, 255, 255, 0.12));
+    background-color: color-mix(in srgb, var(--SmartThemeBodyColor, #dcdde1) 12%, transparent);
 }
 
 #sillyroom_members_bar {
@@ -202,7 +202,7 @@
     gap: 4px;
     padding: 1px 6px;
     border-radius: 8px;
-    background-color: var(--SmartThemeChatTintColor, rgba(255, 255, 255, 0.06));
+    background-color: color-mix(in srgb, var(--SmartThemeBodyColor, #dcdde1) 12%, transparent);
     white-space: nowrap;
 }
 
@@ -232,12 +232,14 @@
     align-self: flex-start;
     padding: 5px 8px;
     border-radius: 8px;
-    background-color: var(--SmartThemeChatTintColor, rgba(255, 255, 255, 0.05));
+    /* ST's own chat-bubble tints: received = bot, sent = user — adapts per theme
+       (ChatTint/BlurTint equal the window color in several themes, hiding bubbles) */
+    background-color: var(--SmartThemeBotMesBlurTintColor, rgba(255, 255, 255, 0.05));
 }
 
 .sillyroom_msg.mine {
     align-self: flex-end;
-    background-color: var(--SmartThemeBlurTintColor, rgba(80, 120, 200, 0.15));
+    background-color: var(--SmartThemeUserMesBlurTintColor, rgba(80, 120, 200, 0.15));
 }
 
 /* P2-2: buffered while offline, waiting for the reconnect flush */
@@ -266,7 +268,7 @@
     margin-left: auto;
     padding: 0 5px;
     border-radius: 9px;
-    background-color: var(--crimson, #e5424d);
+    background-color: var(--warning, #e5424d);
     color: #fff;
     font-size: 0.8em;
     font-weight: 700;

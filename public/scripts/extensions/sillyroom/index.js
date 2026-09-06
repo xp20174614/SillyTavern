@@ -2,6 +2,8 @@
 // Talks to the server plugin endpoint /api/plugins/sillyroom/ws (see plugins/sillyroom/).
 
 import { eventSource, event_types, sendMessageAsUser, Generate, isGenerating } from '../../../script.js';
+import { addLocaleData, getCurrentLocale, t } from '../../i18n.js';
+import { SILLYROOM_LOCALES } from './locales.js';
 
 const WS_PATH = '/api/plugins/sillyroom/ws';
 const STATUS_URL = '/api/plugins/sillyroom/status';
@@ -60,6 +62,18 @@ let unreadCount = 0;
 let lastSeenMessageId = null;
 let reconnectGap = null;
 
+// P2-3: register the extension's bundled dictionary for the running locale
+// (before the window is built, so data-i18n translates at insertion time).
+// Keys are the Simplified Chinese source strings; locales without a bundled
+// dictionary keep them unchanged. Region variants (en-gb) resolve to the base code.
+function registerLocales() {
+    const current = String(getCurrentLocale() ?? '').toLowerCase();
+    const dict = SILLYROOM_LOCALES[current] ?? SILLYROOM_LOCALES[current.split('-')[0]];
+    if (dict) {
+        addLocaleData(current, dict);
+    }
+}
+
 function readStore(key, fallback = '') {
     try {
         return localStorage.getItem(key) ?? fallback;
@@ -95,7 +109,7 @@ function newClientId() {
 // A locally stored (user-typed) nickname wins; otherwise fall back to the
 // account's display name suggested by the server (P1-2), then to a guest name.
 function getName() {
-    return readStore(STORAGE.name) || serverSuggestedName || `访客-${getBaseId().slice(-4)}`;
+    return readStore(STORAGE.name) || serverSuggestedName || t`访客-${getBaseId().slice(-4)}`;
 }
 
 function wsUrl() {
@@ -115,7 +129,7 @@ function renderMembers() {
     const count = members.size;
 
     if (count === 0) {
-        container.append($('<span class="sillyroom_members_hint"></span>').text('未加入房间'));
+        container.append($('<span class="sillyroom_members_hint"></span>').text(t`未加入房间`));
         return;
     }
 
@@ -124,7 +138,7 @@ function renderMembers() {
     for (const [clientId, member] of members) {
         const chip = $('<span class="sillyroom_member_chip"></span>');
         chip.append($('<span class="sillyroom_member_dot"></span>').css('background-color', member.color));
-        chip.append($('<span></span>').text(member.name + (clientId === selfId ? '（我）' : '')));
+        chip.append($('<span></span>').text(member.name + (clientId === selfId ? t`（我）` : '')));
         container.append(chip);
     }
 }
@@ -174,14 +188,14 @@ function newNonce() {
  */
 function appendGapSeparator() {
     $('#sillyroom_messages').append(
-        $('<div class="sillyroom_gap"></div>').text('—— 断线期间的新消息 ——'),
+        $('<div class="sillyroom_gap"></div>').text(t`—— 断线期间的新消息 ——`),
     );
 }
 
 function appendPendingRow(item) {
     const row = $('<div class="sillyroom_msg pending"></div>').attr('data-nonce', item.nonce);
     row.append($('<div class="sillyroom_msg_meta"></div>').append(
-        $('<span class="sillyroom_msg_time"></span>').text('⏳ 待发送'),
+        $('<span class="sillyroom_msg_time"></span>').text(t`⏳ 待发送`),
     ));
     row.append($('<div class="sillyroom_msg_text"></div>').text(item.text));
     $('#sillyroom_messages').append(row);
@@ -212,7 +226,7 @@ function flushOutbox() {
         if (item.room !== joinedRoom) {
             outbox.splice(outbox.indexOf(item), 1);
             $(`#sillyroom_messages .sillyroom_msg[data-nonce="${item.nonce}"]`).remove();
-            appendSystem('[错误] 一条离线消息未发送：房间已切换');
+            appendSystem(t`[错误] 一条离线消息未发送：房间已切换`);
             continue;
         }
         if (!sendWs({ type: 'chat', text: item.text, nonce: item.nonce })) {
@@ -259,7 +273,7 @@ function bumpUnread() {
     unreadCount += 1;
     renderUnread();
     if (unreadCount === 1) {
-        toastr.info('聊天室有新消息，可通过魔杖菜单「💬 聊天室」查看', '聊天室');
+        toastr.info(t`聊天室有新消息，可通过魔杖菜单「💬 聊天室」查看`, t`聊天室`);
     }
 }
 
@@ -270,7 +284,7 @@ function renderTyping() {
         label.text('');
         return;
     }
-    label.text(`${names.join('、')} 正在输入…`);
+    label.text(`${names.join(t`、`)} ${t`正在输入…`}`);
 }
 
 function markTyping(clientId, name, active) {
@@ -300,7 +314,7 @@ function updateRoomControls() {
     // usable while disconnected and sends are buffered in the outbox.
     const expectRejoin = !hasRoom && !!readStore(STORAGE.room);
     const canChat = hasRoom || expectRejoin;
-    const pendingNote = outbox.length ? ` · 待补发 ${outbox.length} 条` : '';
+    const pendingNote = outbox.length ? ` · ` + t`待补发 ${outbox.length} 条` : '';
     $('#sillyroom_join').toggle(!hasRoom);
     $('#sillyroom_leave').toggle(hasRoom);
     $('#sillyroom_room_input').prop('disabled', hasRoom);
@@ -308,10 +322,10 @@ function updateRoomControls() {
     $('#sillyroom_send').prop('disabled', !canChat);
     $('#sillyroom_room_label').text(
         hasRoom
-            ? `房间：${joinedRoom}${pendingNote}`
+            ? t`房间：${joinedRoom}` + pendingNote
             : expectRejoin
-                ? `房间：${readStore(STORAGE.room)}（等待重连）${pendingNote}`
-                : '未加入房间',
+                ? t`房间：${readStore(STORAGE.room)}（等待重连）` + pendingNote
+                : t`未加入房间`,
     );
     $('#sillyroom_member_count').text(hasRoom ? String(members.size) : '0');
 }
@@ -504,11 +518,46 @@ function scheduleReconnect() {
 
     reconnectAttempt += 1;
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** (reconnectAttempt - 1), RECONNECT_MAX_MS);
-    setStatus(`已断开，${Math.round(delay / 1000)}s 后重连…`, 'error');
+    setStatus(t`已断开，${Math.round(delay / 1000)}s 后重连…`, 'error');
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         connect();
     }, delay);
+}
+
+// P2-3: server system/error events carry a stable key + args (added alongside
+// the legacy Chinese text) so every client renders them in its own locale.
+// Unknown keys fall back to the server-provided text.
+function systemText(msg) {
+    switch (msg?.key) {
+        case 'member_joined':
+            return t`${msg.args?.name ?? '?'} 加入了房间`;
+        case 'member_left':
+            return t`${msg.args?.name ?? '?'} 离开了房间`;
+        case 'member_renamed':
+            return t`${msg.args?.oldName ?? '?'} 改名为 ${msg.args?.name ?? '?'}`;
+        default:
+            return String(msg?.text ?? '');
+    }
+}
+
+function errorText(msg) {
+    switch (msg?.key) {
+        case 'err_rooms_limit':
+            return t`服务器房间数量已达上限，请稍后再试`;
+        case 'err_room_full':
+            return t`房间 ${msg.args?.room ?? '?'} 人数已满（${msg.args?.max ?? '?'} 人）`;
+        case 'err_not_in_room':
+            return t`请先加入房间后再发言`;
+        case 'err_rate_limited':
+            return t`发言太快了，请稍作休息`;
+        case 'err_bad_message':
+            return t`无效的消息格式`;
+        case 'err_unknown_type':
+            return t`未知的消息类型`;
+        default:
+            return String(msg?.message ?? '');
+    }
 }
 
 function handleMessage(event) {
@@ -544,7 +593,7 @@ function handleMessage(event) {
             members = new Map((msg.members ?? []).map(m => [m.clientId, m]));
             const history = Array.isArray(msg.history) ? msg.history : [];
             $('#sillyroom_messages').empty();
-            appendSystem(`已加入房间 ${msg.room}`);
+            appendSystem(t`已加入房间 ${msg.room}`);
             // P2-2: locate where the offline catch-up begins in the replay —
             // right after the last message seen before the disconnect, or (if
             // that message aged out of the history window) at the first
@@ -574,7 +623,7 @@ function handleMessage(event) {
             flushOutbox();
             renderMembers();
             updateRoomControls();
-            setStatus('已连接', 'ok');
+            setStatus(t`已连接`, 'ok');
             $('#sillyroom_input').trigger('focus');
             break;
         }
@@ -610,13 +659,13 @@ function handleMessage(event) {
             }
             break;
         case 'system':
-            appendSystem(msg.text ?? '');
+            appendSystem(systemText(msg));
             break;
         case 'typing':
             markTyping(msg.clientId, msg.name, msg.active === true);
             break;
         case 'error':
-            appendSystem(`[错误] ${msg.message ?? ''}`);
+            appendSystem(`[${t`错误`}] ${errorText(msg)}`);
             break;
         case 'pong':
             break;
@@ -628,7 +677,7 @@ function handleMessage(event) {
 function renderRoomSuggestions(roomList) {
     const container = $('#sillyroom_rooms').empty();
     if (!Array.isArray(roomList) || roomList.length === 0) {
-        container.text('暂无活跃房间，输入房间码创建');
+        container.text(t`暂无活跃房间，输入房间码创建`);
         return;
     }
 
@@ -681,11 +730,11 @@ async function connect() {
         const probe = await probeServer();
         if (probe === 'login') {
             loginRequired = true;
-            setStatus('需要登录 SillyTavern 后才能使用聊天室', 'error');
+            setStatus(t`需要登录 SillyTavern 后才能使用聊天室`, 'error');
             return;
         }
 
-        setStatus('连接中…', 'connecting');
+        setStatus(t`连接中…`, 'connecting');
 
         try {
             ws = new WebSocket(wsUrl());
@@ -696,7 +745,7 @@ async function connect() {
 
         ws.onopen = () => {
             reconnectAttempt = 0;
-            setStatus('已连接', 'ok');
+            setStatus(t`已连接`, 'ok');
             // 'hello' from the server triggers auto-rejoin
         };
 
@@ -708,7 +757,7 @@ async function connect() {
                 reconnectGap = { afterId: lastSeenMessageId, at: Date.now() };
                 leaveRoom(false);
             }
-            setStatus('连接已断开', 'error');
+            setStatus(t`连接已断开`, 'error');
             scheduleReconnect();
         };
 
@@ -742,7 +791,7 @@ function sendCurrentInput() {
     }
 
     if (outbox.length >= MAX_OUTBOX) {
-        appendSystem(`[错误] 离线消息缓存已满（${MAX_OUTBOX} 条），请等待重连后再发送`);
+        appendSystem(t`[错误] 离线消息缓存已满（${MAX_OUTBOX} 条），请等待重连后再发送`);
         return;
     }
 
@@ -757,29 +806,29 @@ function buildWindow() {
     const windowHtml = `
     <div id="sillyroom_window" class="sillyroom_hidden">
         <div id="sillyroom_header">
-            <span id="sillyroom_title">💬 聊天室</span>
+            <span id="sillyroom_title" data-i18n="💬 聊天室">💬 聊天室</span>
             <span id="sillyroom_status_dot" class="connecting"></span>
             <span id="sillyroom_status"></span>
             <span class="sillyroom_flex"></span>
-            <a id="sillyroom_minimize" class="sillyroom_icon" href="javascript:void(0)" title="收起">—</a>
+            <a id="sillyroom_minimize" class="sillyroom_icon" href="javascript:void(0)" title="收起" data-i18n="[title]收起">—</a>
         </div>
         <div id="sillyroom_body">
             <div id="sillyroom_controls">
-                <span id="sillyroom_name_display" title="点击修改昵称"></span>
-                <input id="sillyroom_room_input" type="text" maxlength="32" placeholder="房间码（默认 lobby）" autocomplete="off">
-                <button id="sillyroom_join" class="menu_button">加入</button>
-                <button id="sillyroom_leave" class="menu_button">离开</button>
+                <span id="sillyroom_name_display" title="点击修改昵称" data-i18n="[title]点击修改昵称"></span>
+                <input id="sillyroom_room_input" type="text" maxlength="32" placeholder="房间码（默认 lobby）" autocomplete="off" data-i18n="[placeholder]房间码（默认 lobby）">
+                <button id="sillyroom_join" class="menu_button" data-i18n="加入">加入</button>
+                <button id="sillyroom_leave" class="menu_button" data-i18n="离开">离开</button>
             </div>
             <div id="sillyroom_rooms"></div>
             <div id="sillyroom_toggles">
-                <label class="sillyroom_toggle" title="把其他成员的房间发言注入当前聊天（用户侧消息），AI 下次生成时可见">
-                    <input id="sillyroom_inject" type="checkbox"><span>注入聊天</span>
+                <label class="sillyroom_toggle" title="把其他成员的房间发言注入当前聊天（用户侧消息），AI 下次生成时可见" data-i18n="[title]把其他成员的房间发言注入当前聊天（用户侧消息），AI 下次生成时可见">
+                    <input id="sillyroom_inject" type="checkbox"><span data-i18n="注入聊天">注入聊天</span>
                 </label>
-                <label class="sillyroom_toggle" title="把本地 AI 的回复广播到房间，供其他成员查看">
-                    <input id="sillyroom_ai_bcast" type="checkbox"><span>AI 回复广播</span>
+                <label class="sillyroom_toggle" title="把本地 AI 的回复广播到房间，供其他成员查看" data-i18n="[title]把本地 AI 的回复广播到房间，供其他成员查看">
+                    <input id="sillyroom_ai_bcast" type="checkbox"><span data-i18n="AI 回复广播">AI 回复广播</span>
                 </label>
-                <label class="sillyroom_toggle" title="注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上">
-                    <input id="sillyroom_auto_respond" type="checkbox"><span>自动回应</span>
+                <label class="sillyroom_toggle" title="注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上" data-i18n="[title]注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上">
+                    <input id="sillyroom_auto_respond" type="checkbox"><span data-i18n="自动回应">自动回应</span>
                 </label>
             </div>
             <div id="sillyroom_members_bar">
@@ -790,8 +839,8 @@ function buildWindow() {
             <div id="sillyroom_messages"></div>
             <div id="sillyroom_typing"></div>
             <div id="sillyroom_input_row">
-                <input id="sillyroom_input" type="text" maxlength="${MAX_MESSAGE_LENGTH}" placeholder="输入消息，Enter 发送…" autocomplete="off">
-                <button id="sillyroom_send" class="menu_button">发送</button>
+                <input id="sillyroom_input" type="text" maxlength="${MAX_MESSAGE_LENGTH}" placeholder="输入消息，Enter 发送…" autocomplete="off" data-i18n="[placeholder]输入消息，Enter 发送…">
+                <button id="sillyroom_send" class="menu_button" data-i18n="发送">发送</button>
             </div>
         </div>
     </div>`;
@@ -803,7 +852,7 @@ function buildWindow() {
 
     $('#sillyroom_name_display').text(getName()).on('click', function () {
         const current = getName();
-        const next = window.prompt('修改昵称（最长 24 字符）：', current);
+        const next = window.prompt(t`修改昵称（最长 24 字符）：`, current);
         if (next === null) {
             return;
         }
@@ -897,12 +946,17 @@ export function init() {
         return; // already initialized (extension hot reload)
     }
 
+    // P2-3: bundle the extension dictionary before building the window, so
+    // data-i18n translation at DOM-insertion time sees the entries.
+    registerLocales();
+
     buildWindow();
 
     // Entry in the wand (extensions) menu
-    const menuItem = $('<a id="sillyroom_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0" title="打开多人聊天室"></a>');
+    const menuItem = $('<a id="sillyroom_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0"></a>')
+        .attr('title', t`打开多人聊天室`);
     menuItem.append($('<span></span>').text('💬'));
-    menuItem.append($('<span></span>').text('聊天室'));
+    menuItem.append($('<span></span>').text(t`聊天室`));
     // P2-2: unread badge, shown while the chatroom window is minimized
     menuItem.append($('<span id="sillyroom_unread" class="sillyroom_unread"></span>'));
     menuItem.on('click', () => setWindowVisible($('#sillyroom_window').hasClass('sillyroom_hidden')));
@@ -916,12 +970,12 @@ export function init() {
     probeServer().then(state => {
         if (state === 'login') {
             loginRequired = true;
-            setStatus('需要登录 SillyTavern 后才能使用聊天室', 'error');
-            toastr.info('多人聊天室需要先登录 SillyTavern 账号', '聊天室');
+            setStatus(t`需要登录 SillyTavern 后才能使用聊天室`, 'error');
+            toastr.info(t`多人聊天室需要先登录 SillyTavern 账号`, t`聊天室`);
         } else if (state === 'down') {
-            setStatus('服务端插件未启用', 'error');
+            setStatus(t`服务端插件未启用`, 'error');
         } else {
-            setStatus('就绪', 'connecting');
+            setStatus(t`就绪`, 'connecting');
         }
         if (readStore(STORAGE.open) === '1') {
             setWindowVisible(true);

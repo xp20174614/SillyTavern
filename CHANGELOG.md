@@ -2,6 +2,47 @@
 
 记录本项目将 SillyTavern 改造为多人同房聊天室的版本演进。格式参考 [Keep a Changelog](https://keepachangelog.com/)，迭代计划见 [ITERATION_PLAN.md](./ITERATION_PLAN.md)。
 
+## [SillyRoom 0.7.0] — 2026-09-07
+
+### 迭代 P2-3：主题与 i18n 打磨
+
+**改动内容**
+- `public/scripts/extensions/sillyroom/locales.js`（新增）：扩展自带词典，`en` 与 `zh-tw` 两套，键为代码中的中文源串（SillyTavern i18n 惯例：源串即键，查不到翻译时回退键本身，故简体中文无需词典）；同时覆盖客户端文案与服务端 key/args 消息，共 51 键 × 2 语言
+- `public/scripts/extensions/sillyroom/index.js`（前端，全面 i18n 化）：
+  - **注册链路**：`init()` 开头调用 `registerLocales()`——按 `getCurrentLocale()` 精确匹配词典（区域变体如 `en-gb` 回退主码 `en`），经 `addLocaleData` 注入当前语言包，先于窗口构建（保证 `data-i18n` 在 DOM 插入时即可翻译）
+  - **静态界面**：`buildWindow()` 的全部可见文本、按钮、tooltip（`title`）、占位符（`placeholder`）加 `data-i18n` 属性，由 ST 的 MutationObserver 在插入时自动翻译（扩展加载晚于 `initLocales()`，时序安全）
+  - **动态文案**：状态灯文本、房间标签（含「待补发 N 条」「等待重连」后缀）、系统行、typing 提示、离线补发/未读 toastr、昵称 prompt、魔杖菜单项等 36 处 `t` 模板标签；占位符键形如 `房间：${0}` 与词典严格对应
+  - **服务端消息本地化**：新增 `systemText()`/`errorText()`——按服务端新附的 `key`（`member_joined`/`member_left`/`member_renamed`、`err_rate_limited` 等 6 种）+ `args` 在客户端重组本地化文案，未知 key 回退服务端原始 `text`/`message`（兼容旧客户端与调试）
+- `plugins/sillyroom/index.mjs`（服务端，+约 6 行）：3 类 system 广播与全部 6 处 error 响应附带 `key` + `args`（如 `{key:'err_room_full', args:{room, max}}`），原中文文本字段原样保留——协议向后兼容，历史落盘不受影响（system 消息本就不入历史）
+- `public/scripts/extensions/sillyroom/style.css`（主题变量适配）：
+  - 状态灯改语义令牌：ok=`--active`、connecting=`--golden`、error=`--warning`；未读角标 `--crimson`（未定义、一直走回退值）修正为 `--warning`
+  - 气泡底色改用 ST 聊天气泡同源变量：他人=`--SmartThemeBotMesBlurTintColor`、我方=`--SmartThemeUserMesBlurTintColor`——修复默认主题下 `--SmartThemeChatTintColor` 与窗口底色（`--SmartThemeBlurTintColor`）同为不透明近黑色导致气泡不可辨的问题
+  - 成员 chip、房签 hover、AI 徽标改 `color-mix(in srgb, var(--SmartThemeBodyColor) 12%, transparent)`，任意明暗主题下都有保证的对比度；窗口阴影改 `--SmartThemeShadowColor`
+- `ITERATION_PLAN.md` / `CHANGELOG.md`：状态与记录更新
+
+**改动原因**
+0.6.0 为止的全部 UI 文案是硬编码简体中文，非中文用户无法使用；CSS 中状态灯等颜色是硬编码值（且 unread 角标引用了并不存在的 `--crimson` 变量），气泡底色在部分主题下与窗口同色。本迭代把文案全部接入 ST 原生翻译体系（`data-i18n` + `t`，与官方扩展同一机制），配色全部对齐 ST 主题令牌，使聊天室跟随任意明暗主题与界面语言。
+
+**测试结果**
+- `node --check` 通过（扩展 index.js / locales.js / 插件 index.mjs）；服务端启动正常
+- **Node 集成测试 20/20 通过**（测试实例 :8001 / `--dataRoot data-test`）：
+  - 词典完备性：en/zh-tw 键完全对齐（无单侧缺键）；代码中提取的 **14 个 `data-i18n` 键 + 36 个 `t` 模板键（插值规范化为 `${0}` 形式）在两套词典中全部命中**
+  - 协议：join/leave/rename system 消息带 `key`+`args`+原 `text` 三者齐全且值正确；rate-limit/unknown-type/not-in-room 错误带 `key`+原 `message` ✓
+  - 回归：聊天广播与发送者回显（id 一致）、历史回放 ✓
+- **双浏览器标签页实测**（测试实例 :8001）：
+  - 默认中文：窗口全部文案（标题/按钮/开关/tooltip/占位符/成员 chip「（我）」/「已加入房间」）渲染正确
+  - `localStorage.language='en'` 刷新后：静态区（data-i18n）与动态区（t）全部切换为英文，魔杖菜单项与 tooltip 同步；**他人加入的系统消息显示为 "Guest-c50d joined the room"（服务端 key/args → 客户端英文重组）** ✓
+  - 双窗互通：A 发消息 B 实时收到、B 发 A 收到；成员列表双向同步（2 人 + (me) 标记）；刷新后自动重连重入 ✓
+  - 主题适配：默认暗色主题下两种气泡左右对齐、底色可辨；将 ST 主题变量内联覆盖为亮色值后，窗口背景/文字/气泡/边框/阴影全部随变量切换且对比度正常（截图验证）
+  - 重载后稳态 JS 错误钩子捕获 0 错误；无 toastr 报错
+- 测试服务器已停止（按端口定位 PID 单独终止），`data-test/`、临时测试脚本、测试标签页均已清理；`docker/docker-compose.yml` 的工作区改动仍为本机部署配置，未纳入提交
+
+**已知边界（记录为后续迭代项）**
+- 仅内置 en 与 zh-tw 词典；其他语言（ja/ko/de/fr 等 16 种 ST 支持语言）回退显示中文源串——词典结构已就绪，按需补条目即可
+- 服务端 `handleJoin` 的兜底昵称 `访客-xxxx` 仍在服务端以中文生成（客户端始终发送昵称，仅在直连 WS 的极简客户端中出现）；房间建议 chip 的 `id (人数)` 为语言中性
+- `data-i18n` 翻译发生在窗口构建插入时；窗口构建后动态改写的元素（状态/房间标签等）走 `t` 链路，二者不冲突，但用户在运行中切换语言仍需刷新页面（ST 全站行为一致）
+- zh-tw 词典为逐条人工转换，未做大规模校对
+
 ## [SillyRoom 0.6.0] — 2026-09-07
 
 ### 迭代 P2-2：离线补发与未读

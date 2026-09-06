@@ -30,7 +30,7 @@
 |------|------|------|
 | [已完成] | **P2-1 房间历史持久化** | 房间消息落盘到 `data/sillyroom/rooms/<roomId>.json`（共享目录——房间为账号无关实体，非每用户目录），1.5s 防抖合并写入 + 房间清空立即写入 + 优雅关停同步刷新（原子写 tmp+rename）；加入内存中不存在的房间时预载磁盘最近 50 条，复用现有回放链路，前端零改动；损坏文件静默降级 |
 | [已完成] | **P2-2 离线补发与未读** | 断线期间消息缓存补发；窗口最小化时未读角标 |
-| [ ] | **P2-3 主题与 i18n 打磨** | 适配 ST 全部明暗主题变量，接入 ST 翻译体系（data-i18n） |
+| [已完成] | **P2-3 主题与 i18n 打磨** | 前端全部 UI 文案接入 ST 翻译体系：静态界面用 `data-i18n`（含 `[title]`/`[placeholder]` 属性键），动态文案用 `t` 模板标签；扩展自带词典 `locales.js`（en / zh-tw，键为中文源串，经 `addLocaleData` 注册，未覆盖语言回退中文原文）；服务端 system/error 消息附稳定 `key` + `args`（保留原中文 `text`/`message` 作为回退），客户端按 key 本地化渲染。CSS 配色全部走 ST 主题变量：状态灯 `--active/--golden/--warning`、气泡 `--SmartThemeBotMes/UserMesBlurTintColor`（修复默认主题下「我方」气泡与窗口同色不可辨）、阴影 `--SmartThemeShadowColor`、chip 徽标改 `color-mix(BodyColor)` 保证任意主题对比度 |
 
 ## P3 增强功能
 

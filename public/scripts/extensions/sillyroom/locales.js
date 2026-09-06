@@ -1,0 +1,130 @@
+// SillyRoom bundled translations. The Chinese strings used throughout index.js
+// (and by the server plugin's system/error messages) are the translation keys;
+// when the running locale has no entry, ST's i18n falls back to the key itself,
+// so Simplified Chinese needs no dictionary of its own.
+// Registered at init() via addLocaleData() — see i18n.js.
+
+export const SILLYROOM_LOCALES = {
+    'en': {
+        // window chrome
+        '💬 聊天室': '💬 Chatroom',
+        '收起': 'Minimize',
+        '聊天室': 'Chatroom',
+        '打开多人聊天室': 'Open the multiplayer chatroom',
+        // controls
+        '点击修改昵称': 'Click to change nickname',
+        '修改昵称（最长 24 字符）：': 'Change nickname (max 24 characters):',
+        '访客-${0}': 'Guest-${0}',
+        '房间码（默认 lobby）': 'Room code (default: lobby)',
+        '加入': 'Join',
+        '离开': 'Leave',
+        '发送': 'Send',
+        '输入消息，Enter 发送…': 'Type a message, Enter to send…',
+        // toggles
+        '注入聊天': 'Inject into chat',
+        '把其他成员的房间发言注入当前聊天（用户侧消息），AI 下次生成时可见': 'Inject other members\' room messages into the current chat (as user messages), so the AI can tell speakers apart on its next generation',
+        'AI 回复广播': 'Relay AI replies',
+        '把本地 AI 的回复广播到房间，供其他成员查看': 'Broadcast local AI replies to the room for other members to see',
+        '自动回应': 'Auto-respond',
+        '注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上': 'Automatically trigger one AI generation after injected room messages (requires "Inject into chat"); bursts merge after 3s and are throttled by a 15s cooldown to prevent request storms. With multiple members, keep this on one device only',
+        // members / rooms
+        '（我）': ' (me)',
+        '未加入房间': 'Not in a room',
+        '暂无活跃房间，输入房间码创建': 'No active rooms — type a room code to create one',
+        // messages
+        '—— 断线期间的新消息 ——': '—— New messages while offline ——',
+        '⏳ 待发送': '⏳ Pending',
+        '、': ', ',
+        '正在输入…': 'is typing…',
+        '[错误] 一条离线消息未发送：房间已切换': '[Error] An offline message was not sent: the room changed',
+        '[错误] 离线消息缓存已满（${0} 条），请等待重连后再发送': '[Error] The offline buffer is full (${0} messages) — wait for the reconnect before sending more',
+        // room label & connection status
+        '房间：${0}': 'Room: ${0}',
+        '房间：${0}（等待重连）': 'Room: ${0} (waiting to reconnect)',
+        '待补发 ${0} 条': '${0} pending',
+        '就绪': 'Ready',
+        '连接中…': 'Connecting…',
+        '已连接': 'Connected',
+        '连接已断开': 'Disconnected',
+        '已断开，${0}s 后重连…': 'Disconnected, reconnecting in ${0}s…',
+        '已加入房间 ${0}': 'Joined room ${0}',
+        '需要登录 SillyTavern 后才能使用聊天室': 'Log in to SillyTavern to use the chatroom',
+        '服务端插件未启用': 'Server plugin not enabled',
+        // toastr
+        '聊天室有新消息，可通过魔杖菜单「💬 聊天室」查看': 'The chatroom has new messages — open it via the wand menu "💬 Chatroom"',
+        '多人聊天室需要先登录 SillyTavern 账号': 'The multiplayer chatroom requires signing in to a SillyTavern account',
+        // server system events (key/args protocol)
+        '${0} 加入了房间': '${0} joined the room',
+        '${0} 离开了房间': '${0} left the room',
+        '${0} 改名为 ${1}': '${0} renamed to ${1}',
+        // server errors (key/args protocol)
+        '错误': 'Error',
+        '服务器房间数量已达上限，请稍后再试': 'The server has reached its room limit — please try again later',
+        '房间 ${0} 人数已满（${1} 人）': 'Room ${0} is full (max ${1} members)',
+        '请先加入房间后再发言': 'Join a room before sending messages',
+        '发言太快了，请稍作休息': 'Sending too fast — take a short break',
+        '无效的消息格式': 'Invalid message format',
+        '未知的消息类型': 'Unknown message type',
+    },
+    'zh-tw': {
+        // window chrome
+        '💬 聊天室': '💬 聊天室',
+        '收起': '收起',
+        '聊天室': '聊天室',
+        '打开多人聊天室': '開啟多人聊天室',
+        // controls
+        '点击修改昵称': '點擊修改暱稱',
+        '修改昵称（最长 24 字符）：': '修改暱稱（最長 24 字元）：',
+        '访客-${0}': '訪客-${0}',
+        '房间码（默认 lobby）': '房間碼（預設 lobby）',
+        '加入': '加入',
+        '离开': '離開',
+        '发送': '傳送',
+        '输入消息，Enter 发送…': '輸入訊息，Enter 傳送…',
+        // toggles
+        '注入聊天': '注入聊天',
+        '把其他成员的房间发言注入当前聊天（用户侧消息），AI 下次生成时可见': '把其他成員的房間發言注入當前聊天（使用者側訊息），AI 下次生成時可見',
+        'AI 回复广播': 'AI 回覆廣播',
+        '把本地 AI 的回复广播到房间，供其他成员查看': '把本地 AI 的回覆廣播到房間，供其他成員查看',
+        '自动回应': '自動回應',
+        '注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上': '注入真人訊息後自動觸發一次 AI 生成（需開啟「注入聊天」）；3 秒合併連續發言、15 秒冷卻節流，防止請求風暴。多人時建議只開在一台裝置上',
+        // members / rooms
+        '（我）': '（我）',
+        '未加入房间': '未加入房間',
+        '暂无活跃房间，输入房间码创建': '暫無活躍房間，輸入房間碼建立',
+        // messages
+        '—— 断线期间的新消息 ——': '—— 斷線期間的新訊息 ——',
+        '⏳ 待发送': '⏳ 待傳送',
+        '、': '、',
+        '正在输入…': '正在輸入…',
+        '[错误] 一条离线消息未发送：房间已切换': '[錯誤] 一條離線訊息未傳送：房間已切換',
+        '[错误] 离线消息缓存已满（${0} 条），请等待重连后再发送': '[錯誤] 離線訊息快取已滿（${0} 條），請等待重新連線後再傳送',
+        // room label & connection status
+        '房间：${0}': '房間：${0}',
+        '房间：${0}（等待重连）': '房間：${0}（等待重新連線）',
+        '待补发 ${0} 条': '待補發 ${0} 條',
+        '就绪': '就緒',
+        '连接中…': '連線中…',
+        '已连接': '已連線',
+        '连接已断开': '連線已斷開',
+        '已断开，${0}s 后重连…': '已斷線，${0}s 後重新連線…',
+        '已加入房间 ${0}': '已加入房間 ${0}',
+        '需要登录 SillyTavern 后才能使用聊天室': '需要登入 SillyTavern 後才能使用聊天室',
+        '服务端插件未启用': '伺服器外掛未啟用',
+        // toastr
+        '聊天室有新消息，可通过魔杖菜单「💬 聊天室」查看': '聊天室有新訊息，可透過魔杖選單「💬 聊天室」查看',
+        '多人聊天室需要先登录 SillyTavern 账号': '多人聊天室需要先登入 SillyTavern 帳號',
+        // server system events (key/args protocol)
+        '${0} 加入了房间': '${0} 加入了房間',
+        '${0} 离开了房间': '${0} 離開了房間',
+        '${0} 改名为 ${1}': '${0} 改名為 ${1}',
+        // server errors (key/args protocol)
+        '错误': '錯誤',
+        '服务器房间数量已达上限，请稍后再试': '伺服器房間數量已達上限，請稍後再試',
+        '房间 ${0} 人数已满（${1} 人）': '房間 ${0} 人數已滿（${1} 人）',
+        '请先加入房间后再发言': '請先加入房間後再發言',
+        '发言太快了，请稍作休息': '發言太快了，請稍作休息',
+        '无效的消息格式': '無效的訊息格式',
+        '未知的消息类型': '未知的訊息類型',
+    },
+};
