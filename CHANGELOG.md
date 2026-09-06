@@ -2,6 +2,41 @@
 
 记录本项目将 SillyTavern 改造为多人同房聊天室的版本演进。格式参考 [Keep a Changelog](https://keepachangelog.com/)，迭代计划见 [ITERATION_PLAN.md](./ITERATION_PLAN.md)。
 
+## [SillyRoom 0.4.0] — 2026-09-07
+
+### 迭代 P1-2：与官方多用户账号联动
+
+**改动内容**
+- `plugins/sillyroom/index.mjs`（服务端，唯一核心逻辑文件）：
+  - **WS 握手会话校验**：`enableUserAccounts: true` 时，插件用与主应用完全相同的 `cookie-session` 中间件（同名 cookie `getCookieSessionName()` + 同密钥 `getCookieSecret(DATA_ROOT)`，均复用 `src/users.js` 导出，零核心文件改动）对 HTTP 升级请求做纯读校验，再镜像 `setUserDataMiddleware` 的检查链：`session.handle` → 账号存在（node-persist `storage.getItem(toKey(handle))`）→ 账号未禁用；任一环节失败即回 `HTTP 403` 并断开，服务端日志记录拒绝原因。校验为 stub 响应对象（`on-headers` 仅包装 `writeHead`、commit 永不触发），附 5 秒安全超时防止存储读取卡死时升级挂起
+  - **昵称建议**：`hello` 消息新增 `identity` 字段——`{ authenticated, handle, suggestedName }`；`suggestedName` 优先取该账号默认 Persona 名（`data/<handle>/settings.json` → `power_user.personas[default_persona]`），无默认 Persona 时回退账号显示名（user 记录的 `name`），经 `sanitizeText`（24 字符上限）清洗
+  - 单用户模式（`enableUserAccounts: false`）行为完全不变，启动日志明示当前模式（`session authentication enforced` / `no authentication (single-user mode)`）
+- `public/scripts/extensions/sillyroom/index.js`（前端）：
+  - **昵称自动采用**：`hello.identity.suggestedName` 存为 `serverSuggestedName`；本地未自定义过昵称（localStorage `sillyroom:name` 为空）时显示并使用它，用户手动改过昵称则始终以本地为准；建议名先于自动重入房间生效，join 即带正确身份
+  - **登录状态探测**：`connect()` 改为先探测 REST `/status`（与 WS 同受登录保护）再开 WS——403 置 `loginRequired`，状态栏显示「需要登录 SillyTavern 后才能使用聊天室」并停止重连循环（避免会话过期时的无限重连风暴）；每次重连都重新探测，登录恢复（页面刷新）后自动恢复连接
+- `ITERATION_PLAN.md` / `CHANGELOG.md`：状态与记录更新
+
+**改动原因**
+P0/P1 打通了聊天室功能，但任何人都能连上 WS 端点——在官方多用户模式（`enableUserAccounts: true`）下这是明显的越权入口：未登录的访客可以旁观甚至冒名发言。本迭代让聊天室遵循 SillyTavern 自身的登录边界：会话 cookie 无法伪造（HMAC 签名校验），昵称与账号 Persona 打通后多人房间里的名字即真实身份。
+
+**测试结果**
+- 服务端启动无报错，插件日志明示鉴权模式
+- **多用户 ON（集成测试 14/14 通过，测试实例 :8001 / `--dataRoot data-test`）**：
+  - T1 无 cookie：REST `/status` 403、WS 升级 403 拒绝、无 hello ✓（服务端日志：`rejected WebSocket upgrade (not-logged-in)`）
+  - T2 有效会话（经 `/login` 自动登录获取 cookie）：REST 200、WS 通过，`identity` = `{authenticated: true, handle: 'default-user', suggestedName: '测试君'}`（Persona 名解析 ✓）；双人加入房间、聊天广播互通（多用户模式下功能回归）✓
+  - T3 防伪造：cookie 名不匹配（签名校验失败）403 ✓；**用真实密钥合法签名但 handle 不存在**的 cookie 403 ✓（校验不止依赖签名，还验证账号存在性）
+- **多用户 ON（双浏览器标签页实测）**：昵称自动显示「测试君」（localStorage 无自定义名时采用 Persona 建议）；两标签页自动重入同一房间、成员列表实时同步（含「（我）」标记）、消息双向实时互通、历史回放正常；房间建议 chip、三开关、状态灯渲染正常，无 toastr 错误；无凭证探测返回 403（`loginRequired` 分支触发信号实证）
+- **多用户 OFF 回归（5/5 通过）**：无 cookie 直连通过、`identity.authenticated: false`、无 suggestedName 泄漏、加入房间与聊天广播与 0.1.0 行为一致
+- 测试服务器已停止，`data-test/`、临时测试脚本、config.yaml 临时改动均已还原清理
+
+**已知边界（记录为后续迭代项）**
+- 多用户模式下浏览器始终自动登录（单一无密码账号），「需要登录」提示仅在实际会话过期时出现（如配置了 `sessionTimeout` 的长开标签页）；该分支逻辑已由协议层 403 实证
+- 昵称建议只在 localStorage 无自定义昵称时生效；改过昵称的设备永不更新建议（预期行为——本地选择优先）
+- `session.version` 校验未镜像（密码重置后旧会话 cookie 在下一次 HTTP 请求即失效，聊天室存在一个极短的宽限窗口）；账号存在性 + 启用状态已校验，安全影响可忽略
+- WS 鉴权只保护聊天室端点本身；房间内发言仍以昵称为准，无账号级身份绑定展示（可在 P3-1 房主权限中做「成员已验证」徽标）
+
+
+
 ## [SillyRoom 0.3.0] — 2026-09-07
 
 ### 迭代 P1-3：注入后自动回应（可选开关）

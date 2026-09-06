@@ -43,6 +43,10 @@ let typingTimer = null;
 let autoRespondTimer = null;
 let autoRespondRetries = 0;
 let lastAutoRespondAt = 0;
+// P1-2 account integration state
+let serverSuggestedName = null;
+let loginRequired = false;
+let connectInFlight = false;
 
 function readStore(key, fallback = '') {
     try {
@@ -76,8 +80,10 @@ function newClientId() {
     return `${getBaseId()}-${rand}`;
 }
 
+// A locally stored (user-typed) nickname wins; otherwise fall back to the
+// account's display name suggested by the server (P1-2), then to a guest name.
 function getName() {
-    return readStore(STORAGE.name) || `访客-${getBaseId().slice(-4)}`;
+    return readStore(STORAGE.name) || serverSuggestedName || `访客-${getBaseId().slice(-4)}`;
 }
 
 function wsUrl() {
@@ -364,7 +370,7 @@ function leaveRoom(notifyServer = true) {
 }
 
 function scheduleReconnect() {
-    if (intentionallyClosed || reconnectTimer) {
+    if (intentionallyClosed || loginRequired || reconnectTimer) {
         return;
     }
 
@@ -387,6 +393,16 @@ function handleMessage(event) {
 
     switch (msg.type) {
         case 'hello': {
+            // P1-2: in multi-user mode the server suggests the account's
+            // display name (default Persona name, else account name); a
+            // locally customized nickname always wins over the suggestion.
+            const suggested = typeof msg.identity?.suggestedName === 'string' ? msg.identity.suggestedName : null;
+            if (suggested) {
+                serverSuggestedName = suggested;
+                if (!readStore(STORAGE.name)) {
+                    $('#sillyroom_name_display').text(getName());
+                }
+            }
             renderRoomSuggestions(msg.rooms ?? []);
             if (readStore(STORAGE.room)) {
                 joinRoom(readStore(STORAGE.room));
@@ -463,43 +479,83 @@ function renderRoomSuggestions(roomList) {
     }
 }
 
-function connect() {
+/**
+ * Probes the REST status endpoint before opening the WebSocket. The endpoint
+ * sits behind the same login requirement as the main app (P1-2), so a 403
+ * here means "not logged in" — the WS upgrade would be rejected the same way.
+ * @returns {Promise<'ok'|'login'|'down'>} Probe result
+ */
+async function probeServer() {
+    try {
+        const response = await fetch(STATUS_URL);
+        if (response.status === 403) {
+            return 'login';
+        }
+        if (!response.ok) {
+            return 'down';
+        }
+        const data = await response.json();
+        renderRoomSuggestions(data.rooms ?? []);
+        return 'ok';
+    } catch {
+        return 'down';
+    }
+}
+
+async function connect() {
+    if (connectInFlight || loginRequired) {
+        return;
+    }
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return;
     }
 
-    setStatus('连接中…', 'connecting');
-
+    connectInFlight = true;
     try {
-        ws = new WebSocket(wsUrl());
-    } catch {
-        scheduleReconnect();
-        return;
-    }
-
-    ws.onopen = () => {
-        reconnectAttempt = 0;
-        setStatus('已连接', 'ok');
-        // 'hello' from the server triggers auto-rejoin
-    };
-
-    ws.onmessage = handleMessage;
-
-    ws.onclose = () => {
-        if (joinedRoom) {
-            leaveRoom(false);
+        // Re-probe on every (re)connect so an expired session surfaces as a
+        // clear "login required" state instead of an endless reconnect loop.
+        const probe = await probeServer();
+        if (probe === 'login') {
+            loginRequired = true;
+            setStatus('需要登录 SillyTavern 后才能使用聊天室', 'error');
+            return;
         }
-        setStatus('连接已断开', 'error');
-        scheduleReconnect();
-    };
 
-    ws.onerror = () => {
+        setStatus('连接中…', 'connecting');
+
         try {
-            ws.close();
+            ws = new WebSocket(wsUrl());
         } catch {
-            // already closed
+            scheduleReconnect();
+            return;
         }
-    };
+
+        ws.onopen = () => {
+            reconnectAttempt = 0;
+            setStatus('已连接', 'ok');
+            // 'hello' from the server triggers auto-rejoin
+        };
+
+        ws.onmessage = handleMessage;
+
+        ws.onclose = () => {
+            if (joinedRoom) {
+                leaveRoom(false);
+            }
+            setStatus('连接已断开', 'error');
+            scheduleReconnect();
+        };
+
+        ws.onerror = () => {
+            try {
+                ws.close();
+            } catch {
+                // already closed
+            }
+        };
+    } finally {
+        connectInFlight = false;
+    }
 }
 
 function sendCurrentInput() {
@@ -669,19 +725,22 @@ export function init() {
     // AI reply relay: plain generations only
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
 
-    // Probe the server plugin (shows a clear hint when enableServerPlugins is off)
-    fetch(STATUS_URL)
-        .then(response => (response.ok ? response.json() : Promise.reject(new Error('not ok'))))
-        .then(data => {
-            renderRoomSuggestions(data.rooms ?? []);
-            if (readStore(STORAGE.open) === '1') {
-                setWindowVisible(true);
-            }
-            setStatus('就绪', 'connecting');
-        })
-        .catch(() => {
+    // Probe the server plugin: shows a clear hint when enableServerPlugins is
+    // off, and a login hint when SillyTavern's multi-user mode requires auth.
+    probeServer().then(state => {
+        if (state === 'login') {
+            loginRequired = true;
+            setStatus('需要登录 SillyTavern 后才能使用聊天室', 'error');
+            toastr.info('多人聊天室需要先登录 SillyTavern 账号', '聊天室');
+        } else if (state === 'down') {
             setStatus('服务端插件未启用', 'error');
-        });
+        } else {
+            setStatus('就绪', 'connecting');
+        }
+        if (readStore(STORAGE.open) === '1') {
+            setWindowVisible(true);
+        }
+    });
 
     console.log('SillyRoom: extension initialized');
 }

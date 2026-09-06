@@ -1,6 +1,17 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
+import cookieSession from 'cookie-session';
+import storage from 'node-persist';
 import { WebSocketServer } from 'ws';
+
+// P1-2: reuse the main app's session building blocks so WebSocket upgrades can
+// be authenticated against the very same signed session cookie. These modules
+// are already loaded by the server, so importing them adds no side effects.
+import { SETTINGS_FILE } from '../../src/constants.js';
+import { getConfigValue } from '../../src/util.js';
+import { getCookieSecret, getCookieSessionName, getUserDirectories, toKey } from '../../src/users.js';
 
 /**
  * SillyRoom — multi-user live chatroom server plugin.
@@ -318,6 +329,97 @@ function handleTyping(ws, payload) {
     }, { except: ws });
 }
 
+/**
+ * P1-2: best-effort display name for the logged-in account — the default
+ * Persona's name when one is set, else the account's own name. Sent to the
+ * client as a suggestion only; a locally customized nickname still wins.
+ * @param {object} user User account record from storage
+ * @param {object} directories User directory listing
+ * @returns {string|null} Suggested nickname or null when nothing usable
+ */
+function resolveAccountDisplayName(user, directories) {
+    try {
+        const settingsPath = path.join(directories.root, SETTINGS_FILE);
+        if (fs.existsSync(settingsPath)) {
+            const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+            const powerUser = settings?.power_user;
+            const personaName = powerUser?.default_persona
+                ? powerUser?.personas?.[powerUser.default_persona]
+                : null;
+            if (typeof personaName === 'string' && personaName.trim()) {
+                return sanitizeText(personaName, MAX_NAME_LENGTH);
+            }
+        }
+    } catch {
+        // unreadable settings.json; fall back to the account name
+    }
+
+    return sanitizeText(user?.name, MAX_NAME_LENGTH);
+}
+
+/**
+ * P1-2: verifies that an upgrade request carries a valid SillyTavern login
+ * session. Runs the same cookie-session middleware as the main app against a
+ * stub response (verification only — nothing is ever written back), then
+ * mirrors setUserDataMiddleware's checks: session handle → account exists →
+ * account enabled.
+ * @param {import('node:http').IncomingMessage} request The HTTP upgrade request
+ * @param {Function} middleware cookie-session middleware built in initSocket
+ * @returns {Promise<{ok: boolean, reason?: string, handle?: string, suggestedName?: string|null}>}
+ */
+function authenticateUpgrade(request, middleware) {
+    return new Promise(resolve => {
+        // on-headers only wraps response.writeHead and the commit callback
+        // fires solely when headers are written; a bare stub never commits.
+        const stubResponse = {
+            writeHead() { },
+            setHeader() { },
+            getHeader() { return undefined; },
+            appendHeader() { },
+            end() { },
+        };
+
+        let settled = false;
+        const finish = result => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timeout);
+                resolve(result);
+            }
+        };
+
+        // Safety net: never leave an upgrade hanging on a stalled storage read
+        const timeout = setTimeout(() => finish({ ok: false, reason: 'timeout' }), 5000);
+        timeout.unref?.();
+
+        try {
+            middleware(request, stubResponse, async () => {
+                try {
+                    const handle = request.session?.handle;
+                    if (typeof handle !== 'string' || !handle) {
+                        return finish({ ok: false, reason: 'not-logged-in' });
+                    }
+
+                    const user = await storage.getItem(toKey(handle));
+                    if (!user || user.enabled === false) {
+                        return finish({ ok: false, reason: 'unknown-or-disabled-account' });
+                    }
+
+                    finish({
+                        ok: true,
+                        handle,
+                        suggestedName: resolveAccountDisplayName(user, getUserDirectories(handle)),
+                    });
+                } catch {
+                    finish({ ok: false, reason: 'session-lookup-failed' });
+                }
+            });
+        } catch {
+            finish({ ok: false, reason: 'session-parse-failed' });
+        }
+    });
+}
+
 function onMessage(ws, raw) {
     let payload;
     try {
@@ -381,7 +483,13 @@ function handleConnection(ws) {
         }
     });
 
-    send(ws, { type: 'hello', rooms: listRooms(), limits: { maxMessageLength: MAX_MESSAGE_LENGTH, maxMembersPerRoom: MAX_MEMBERS_PER_ROOM } });
+    // P1-2: account identity hint for multi-user mode (client uses
+    // suggestedName as the default nickname unless a custom one is stored)
+    const identity = ws.auth
+        ? { authenticated: true, handle: ws.auth.handle, suggestedName: ws.auth.suggestedName }
+        : { authenticated: false };
+
+    send(ws, { type: 'hello', rooms: listRooms(), limits: { maxMessageLength: MAX_MESSAGE_LENGTH, maxMembersPerRoom: MAX_MEMBERS_PER_ROOM }, identity });
 }
 
 function heartbeat() {
@@ -429,6 +537,17 @@ export function initSocket(servers) {
     wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
     wss.on('connection', handleConnection);
 
+    // P1-2: build a session verifier identical to the main app's. Verification
+    // only reads the signed cookie, so the name + secret suffice; maxAge and
+    // sameSite only matter when writing, which never happens on a stub.
+    let sessionMiddleware = null;
+    if (getConfigValue('enableUserAccounts', false, 'boolean')) {
+        sessionMiddleware = cookieSession({
+            name: getCookieSessionName(),
+            secret: getCookieSecret(globalThis.DATA_ROOT),
+        });
+    }
+
     for (const server of servers) {
         const listener = (request, socket, head) => {
             let pathname = '/';
@@ -439,7 +558,27 @@ export function initSocket(servers) {
             }
 
             if (pathname === WS_PATH) {
-                wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws, request));
+                if (!sessionMiddleware) {
+                    // Single-user mode: no login requirement, behave as before
+                    wss.handleUpgrade(request, socket, head, ws => {
+                        ws.auth = null;
+                        wss.emit('connection', ws, request);
+                    });
+                    return;
+                }
+
+                authenticateUpgrade(request, sessionMiddleware).then(auth => {
+                    if (!auth.ok) {
+                        console.log(`SillyRoom: rejected WebSocket upgrade (${auth.reason ?? 'unauthenticated'})`);
+                        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+                        socket.destroy();
+                        return;
+                    }
+                    wss.handleUpgrade(request, socket, head, ws => {
+                        ws.auth = auth;
+                        wss.emit('connection', ws, request);
+                    });
+                });
             } else if (server.listenerCount('upgrade') <= 1) {
                 // Nobody else is going to handle this upgrade request
                 socket.destroy();
@@ -453,7 +592,8 @@ export function initSocket(servers) {
     heartbeatTimer = setInterval(heartbeat, HEARTBEAT_INTERVAL_MS);
     heartbeatTimer.unref?.();
 
-    console.log(`SillyRoom: WebSocket endpoint ready at ${WS_PATH}`);
+    const authMode = sessionMiddleware ? 'session authentication enforced' : 'no authentication (single-user mode)';
+    console.log(`SillyRoom: WebSocket endpoint ready at ${WS_PATH} (${authMode})`);
 }
 
 /**
