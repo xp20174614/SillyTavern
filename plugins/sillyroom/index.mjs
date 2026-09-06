@@ -39,6 +39,10 @@ const MAX_ROOM_ID_LENGTH = 32;
 const MAX_MEMBERS_PER_ROOM = 32;
 const MAX_ROOMS = 100;
 const HISTORY_LIMIT = 50;
+// P2-1: room history persists to <DATA_ROOT>/sillyroom/rooms/<roomId>.json so
+// chat survives restarts. Rooms are account-agnostic shared entities, so the
+// history lives in a shared folder rather than any per-user directory.
+const HISTORY_FLUSH_DEBOUNCE_MS = 1500;
 const RATE_WINDOW_MS = 5000;
 const RATE_MAX_MESSAGES = 15;
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -57,6 +61,9 @@ let wss = null;
 let heartbeatTimer = null;
 let messageIdCounter = 0;
 const upgradeListeners = [];
+
+/** @type {Map<string, NodeJS.Timeout>} P2-1 pending debounced history writes, keyed by room id */
+const roomFlushTimers = new Map();
 
 /**
  * @typedef {object} Member
@@ -182,6 +189,10 @@ function leaveRoom(ws) {
     ws.member = null;
 
     if (room.members.size === 0) {
+        // P2-1: the room leaves memory here — flush its history right away
+        // instead of waiting out the debounce window.
+        cancelRoomFlush(room.id);
+        void flushRoomNow(room);
         rooms.delete(room.id);
     }
 }
@@ -216,6 +227,140 @@ function isRateLimited(ws) {
     return false;
 }
 
+// --- P2-1: room history persistence -----------------------------------------
+
+function roomsDir() {
+    return path.join(globalThis.DATA_ROOT ?? 'data', 'sillyroom', 'rooms');
+}
+
+function roomFilePath(roomId) {
+    // roomId matches ROOM_ID_PATTERN, so it is safe to embed in a filename
+    return path.join(roomsDir(), `${roomId}.json`);
+}
+
+function roomSnapshot(room) {
+    return JSON.stringify({ id: room.id, savedAt: Date.now(), messages: room.history });
+}
+
+/**
+ * Validates a message loaded from disk with the same rules as live messages;
+ * anything malformed is dropped instead of poisoning the replay.
+ */
+function sanitizePersistedMessage(raw) {
+    if (!raw || typeof raw !== 'object') {
+        return null;
+    }
+
+    const id = typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 64) : null;
+    const text = typeof raw.text === 'string' && raw.text ? raw.text.slice(0, MAX_MESSAGE_LENGTH) : null;
+    const from = raw.from && typeof raw.from === 'object' ? raw.from : null;
+
+    if (!id || !text || !from) {
+        return null;
+    }
+
+    return {
+        id,
+        from: {
+            clientId: sanitizeClientId(from.clientId) ?? 'unknown',
+            name: sanitizeText(from.name, MAX_NAME_LENGTH) ?? '???',
+            color: sanitizeColor(from.color, from.clientId ?? ''),
+        },
+        ...(raw.kind === 'ai' ? { kind: 'ai' } : {}),
+        text,
+        ts: Number.isFinite(raw.ts) ? raw.ts : Date.now(),
+    };
+}
+
+/**
+ * Preloads persisted history when a room is (re)created in memory. Sync and
+ * capped; a missing or corrupt file just means an empty history.
+ * @param {Room} room Freshly created room object
+ */
+function loadRoomHistory(room) {
+    try {
+        const data = JSON.parse(fs.readFileSync(roomFilePath(room.id), 'utf8'));
+        const messages = Array.isArray(data?.messages) ? data.messages : [];
+        room.history = messages
+            .map(sanitizePersistedMessage)
+            .filter(Boolean)
+            .slice(-HISTORY_LIMIT);
+        for (const message of room.history) {
+            message.room = room.id;
+        }
+    } catch {
+        // no file yet or unreadable; start with an empty history
+    }
+}
+
+/**
+ * Writes a room's history to disk atomically (tmp file + rename). Rooms with
+ * no messages are skipped — there is nothing worth restoring.
+ * @param {Room} room Room to persist
+ * @returns {Promise<void>}
+ */
+async function flushRoomNow(room) {
+    roomFlushTimers.delete(room.id);
+
+    if (!room.history.length) {
+        return;
+    }
+
+    try {
+        const filePath = roomFilePath(room.id);
+        const tmpPath = `${filePath}.tmp`;
+        await fs.promises.writeFile(tmpPath, roomSnapshot(room), 'utf8');
+        await fs.promises.rename(tmpPath, filePath);
+    } catch (error) {
+        console.error('SillyRoom: failed to persist room history', error);
+    }
+}
+
+/**
+ * Debounces history writes so a message burst hits the disk once.
+ * @param {Room} room Room that just received a message
+ */
+function scheduleRoomFlush(room) {
+    if (roomFlushTimers.has(room.id)) {
+        return;
+    }
+
+    const timer = setTimeout(() => {
+        roomFlushTimers.delete(room.id);
+        void flushRoomNow(room);
+    }, HISTORY_FLUSH_DEBOUNCE_MS);
+    timer.unref?.();
+    roomFlushTimers.set(room.id, timer);
+}
+
+function cancelRoomFlush(roomId) {
+    const timer = roomFlushTimers.get(roomId);
+    if (timer) {
+        clearTimeout(timer);
+        roomFlushTimers.delete(roomId);
+    }
+}
+
+/**
+ * P2-1 shutdown path: flush every occupied room's history synchronously so a
+ * server stop cannot lose the last debounce window of messages.
+ */
+function persistRoomsSync() {
+    for (const room of rooms.values()) {
+        if (!room.history.length) {
+            continue;
+        }
+        try {
+            const filePath = roomFilePath(room.id);
+            const tmpPath = `${filePath}.tmp`;
+            fs.writeFileSync(tmpPath, roomSnapshot(room), 'utf8');
+            fs.renameSync(tmpPath, filePath);
+        } catch (error) {
+            console.error('SillyRoom: failed to persist room history on exit', error);
+        }
+    }
+}
+
 function handleJoin(ws, payload) {
     const roomId = sanitizeRoomId(payload?.room) ?? 'lobby';
 
@@ -228,7 +373,13 @@ function handleJoin(ws, payload) {
         return;
     }
 
-    const room = rooms.get(roomId) ?? createRoom(roomId);
+    let room = rooms.get(roomId);
+    if (!room) {
+        room = createRoom(roomId);
+        // P2-1: a room unknown to this process may still have persisted history
+        // from a previous run — reload it so the join replay includes it.
+        loadRoomHistory(room);
+    }
 
     if (room.members.size >= MAX_MEMBERS_PER_ROOM) {
         send(ws, { type: 'error', message: `房间 ${roomId} 人数已满（${MAX_MEMBERS_PER_ROOM} 人）` });
@@ -294,6 +445,9 @@ function handleChat(ws, payload) {
     if (ws.room.history.length > HISTORY_LIMIT) {
         ws.room.history.splice(0, ws.room.history.length - HISTORY_LIMIT);
     }
+
+    // P2-1: persist the new message (debounced so bursts write once)
+    scheduleRoomFlush(ws.room);
 
     broadcast(ws.room, { type: 'chat', ...message });
 }
@@ -534,6 +688,13 @@ export function init(router) {
  * @returns {void}
  */
 export function initSocket(servers) {
+    // P2-1: make sure the history storage directory exists before any write
+    try {
+        fs.mkdirSync(roomsDir(), { recursive: true });
+    } catch (error) {
+        console.error('SillyRoom: failed to create history directory', error);
+    }
+
     wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
     wss.on('connection', handleConnection);
 
@@ -593,7 +754,7 @@ export function initSocket(servers) {
     heartbeatTimer.unref?.();
 
     const authMode = sessionMiddleware ? 'session authentication enforced' : 'no authentication (single-user mode)';
-    console.log(`SillyRoom: WebSocket endpoint ready at ${WS_PATH} (${authMode})`);
+    console.log(`SillyRoom: WebSocket endpoint ready at ${WS_PATH} (${authMode}), history persisted in ${roomsDir()}`);
 }
 
 /**
@@ -605,6 +766,14 @@ export function exit() {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
     }
+
+    // P2-1: drop pending debounces and flush occupied rooms synchronously —
+    // after this point the process may be gone, so nothing async is safe.
+    for (const timer of roomFlushTimers.values()) {
+        clearTimeout(timer);
+    }
+    roomFlushTimers.clear();
+    persistRoomsSync();
 
     for (const { server, listener } of upgradeListeners) {
         server.removeListener('upgrade', listener);
