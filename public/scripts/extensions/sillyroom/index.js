@@ -1,7 +1,7 @@
 // SillyRoom client extension — multi-user live chatroom over WebSocket.
 // Talks to the server plugin endpoint /api/plugins/sillyroom/ws (see plugins/sillyroom/).
 
-import { eventSource, event_types, sendMessageAsUser } from '../../../script.js';
+import { eventSource, event_types, sendMessageAsUser, Generate, isGenerating } from '../../../script.js';
 
 const WS_PATH = '/api/plugins/sillyroom/ws';
 const STATUS_URL = '/api/plugins/sillyroom/status';
@@ -13,12 +13,19 @@ const STORAGE = {
     open: 'sillyroom:windowOpen',
     inject: 'sillyroom:inject',
     aiBcast: 'sillyroom:aiBcast',
+    autoRespond: 'sillyroom:autoRespond',
 };
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const TYPING_DISPLAY_MS = 4000;
 const MAX_MESSAGE_LENGTH = 2000;
+// P1-3 auto-respond throttling: a burst of room messages coalesces into ONE
+// generation after this idle window; generations are spaced at least
+// AUTO_RESPOND_COOLDOWN_MS apart no matter how many members are talking.
+const AUTO_RESPOND_IDLE_MS = 3000;
+const AUTO_RESPOND_COOLDOWN_MS = 15000;
+const AUTO_RESPOND_BUSY_RETRIES = 2;
 
 /** @type {WebSocket|null} */
 let ws = null;
@@ -32,6 +39,10 @@ let members = new Map();
 /** @type {Map<string, {name: string, timer: number}>} */
 let typingUsers = new Map();
 let typingTimer = null;
+// P1-3 auto-respond state
+let autoRespondTimer = null;
+let autoRespondRetries = 0;
+let lastAutoRespondAt = 0;
 
 function readStore(key, fallback = '') {
     try {
@@ -221,11 +232,90 @@ function injectRoomMessage(payload) {
     injectionQueue = injectionQueue.then(async () => {
         try {
             await sendMessageAsUser(text, null, null, true, from.name);
+            scheduleAutoRespond();
         } catch (error) {
             console.warn('SillyRoom: failed to inject room message into chat', error);
         }
     });
 }
+
+// --- P1-3: auto-respond after injected room messages ------------------------
+
+function autoRespondEnabled() {
+    return $('#sillyroom_auto_respond').prop('checked');
+}
+
+/**
+ * Arms the auto-respond idle timer. Called after each injected room message,
+ * so a burst of messages coalesces into a single generation that sees the
+ * whole burst instead of one request per message.
+ */
+function scheduleAutoRespond() {
+    if (!autoRespondEnabled() || !joinedRoom) {
+        return;
+    }
+    clearTimeout(autoRespondTimer);
+    autoRespondRetries = 0;
+    autoRespondTimer = setTimeout(autoRespondNow, AUTO_RESPOND_IDLE_MS);
+}
+
+function cancelAutoRespond() {
+    clearTimeout(autoRespondTimer);
+    autoRespondTimer = null;
+    autoRespondRetries = 0;
+}
+
+/**
+ * Triggers one AI generation ('normal') so the local AI replies to the
+ * injected room messages. Storm protection:
+ * - idle debounce (scheduleAutoRespond) merges bursts into one generation;
+ * - global cooldown allows at most one auto generation per
+ *   AUTO_RESPOND_COOLDOWN_MS regardless of how many members are talking —
+ *   room owners should keep this on only on one member for strict control;
+ * - never interrupts an in-flight generation (bounded retries instead);
+ * - yields to a user draft in the send box (their own send triggers the AI);
+ * - kind:'ai' relays are never injected (P1-1), so replies can't re-trigger.
+ */
+async function autoRespondNow() {
+    autoRespondTimer = null;
+
+    if (!autoRespondEnabled() || !joinedRoom) {
+        return;
+    }
+
+    const sinceLast = Date.now() - lastAutoRespondAt;
+    if (sinceLast < AUTO_RESPOND_COOLDOWN_MS) {
+        autoRespondTimer = setTimeout(autoRespondNow, AUTO_RESPOND_COOLDOWN_MS - sinceLast);
+        return;
+    }
+
+    const context = SillyTavern.getContext();
+    // Group chats manage their own reply order; a character must be loaded.
+    if (context.groupId || context.characterId == null || !Array.isArray(context.chat) || context.chat.length === 0) {
+        return;
+    }
+
+    if (String($('#send_textarea').val() ?? '').trim()) {
+        return; // user is drafting a reply; their send will trigger the AI
+    }
+
+    if (isGenerating()) {
+        if (autoRespondRetries < AUTO_RESPOND_BUSY_RETRIES) {
+            autoRespondRetries += 1;
+            autoRespondTimer = setTimeout(autoRespondNow, AUTO_RESPOND_IDLE_MS);
+        }
+        return;
+    }
+
+    lastAutoRespondAt = Date.now();
+    try {
+        await Generate('normal');
+    } catch (error) {
+        console.warn('SillyRoom: auto-respond generation failed', error);
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 /**
  * Broadcasts a locally generated AI reply to the room. Fired on
@@ -267,6 +357,7 @@ function leaveRoom(notifyServer = true) {
     joinedRoom = null;
     members.clear();
     typingUsers.clear();
+    cancelAutoRespond();
     renderTyping();
     renderMembers();
     updateRoomControls();
@@ -450,6 +541,9 @@ function buildWindow() {
                 <label class="sillyroom_toggle" title="把本地 AI 的回复广播到房间，供其他成员查看">
                     <input id="sillyroom_ai_bcast" type="checkbox"><span>AI 回复广播</span>
                 </label>
+                <label class="sillyroom_toggle" title="注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上">
+                    <input id="sillyroom_auto_respond" type="checkbox"><span>自动回应</span>
+                </label>
             </div>
             <div id="sillyroom_members_bar">
                 <span id="sillyroom_room_label"></span>
@@ -499,6 +593,16 @@ function buildWindow() {
         .prop('checked', readStore(STORAGE.aiBcast) !== '0')
         .on('change', function () {
             writeStore(STORAGE.aiBcast, this.checked ? '1' : '0');
+        });
+    // Auto-respond defaults to OFF: it spends API quota on its own and only
+    // makes sense as an explicit opt-in (spec: 可选开关).
+    $('#sillyroom_auto_respond')
+        .prop('checked', readStore(STORAGE.autoRespond) === '1')
+        .on('change', function () {
+            writeStore(STORAGE.autoRespond, this.checked ? '1' : '0');
+            if (!this.checked) {
+                cancelAutoRespond();
+            }
         });
 
     $('#sillyroom_join').on('click', () => joinRoom($('#sillyroom_room_input').val()));
