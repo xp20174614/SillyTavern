@@ -39,6 +39,13 @@ export const SILLYROOM_LOCALES = {
         '解除禁言': 'Unmute',
         '移出房间': 'Remove from room',
         '你已被房主移出了房间': 'You were removed from the room by the owner',
+        // room password (P3-1b)
+        '设置房间密码': 'Set a room password',
+        '房间已锁定，点击修改或清除密码': 'Room locked — click to change or clear the password',
+        '该房间设有密码，请输入：': 'This room is locked — enter the password:',
+        '密码不正确，请重新输入：': 'Incorrect password — please try again:',
+        '设置房间密码（留空则不设置）：': 'Set a room password (leave empty to skip):',
+        '房间已锁定，输入新密码可更换，清空则取消密码：': 'Room is locked — type a new password to replace it, or clear the field to remove it:',
         // messages
         '—— 断线期间的新消息 ——': '—— New messages while offline ——',
         '⏳ 待发送': '⏳ Pending',
@@ -68,6 +75,8 @@ export const SILLYROOM_LOCALES = {
         '${0} 将 ${1} 移出了房间': '${0} removed ${1} from the room',
         '${0} 禁言了 ${1}': '${0} muted ${1}',
         '${0} 解除了 ${1} 的禁言': '${0} unmuted ${1}',
+        '${0} 设置了房间密码': '${0} locked the room with a password',
+        '${0} 取消了房间密码': '${0} removed the room password',
         // server errors (key/args protocol)
         '错误': 'Error',
         '服务器房间数量已达上限，请稍后再试': 'The server has reached its room limit — please try again later',
@@ -79,6 +88,8 @@ export const SILLYROOM_LOCALES = {
         '只有房主可以执行此操作': 'Only the room owner can do that',
         '你已被禁言，无法发言': 'You are muted and cannot speak',
         '目标成员不在房间中': 'That member is not in the room',
+        '房间 ${0} 已设置密码，请输入密码加入': 'Room ${0} is locked — enter the password to join',
+        '房间密码不正确': 'Incorrect room password',
     },
     'zh-tw': {
         // window chrome
@@ -114,6 +125,13 @@ export const SILLYROOM_LOCALES = {
         '解除禁言': '解除禁言',
         '移出房间': '移出房間',
         '你已被房主移出了房间': '你已被房主移出了房間',
+        // room password (P3-1b)
+        '设置房间密码': '設定房間密碼',
+        '房间已锁定，点击修改或清除密码': '房間已鎖定，點擊修改或清除密碼',
+        '该房间设有密码，请输入：': '該房間設有密碼，請輸入：',
+        '密码不正确，请重新输入：': '密碼不正確，請重新輸入：',
+        '设置房间密码（留空则不设置）：': '設定房間密碼（留空則不設定）：',
+        '房间已锁定，输入新密码可更换，清空则取消密码：': '房間已鎖定，輸入新密碼可更換，清空則取消密碼：',
         // messages
         '—— 断线期间的新消息 ——': '—— 斷線期間的新訊息 ——',
         '⏳ 待发送': '⏳ 待傳送',
@@ -143,6 +161,8 @@ export const SILLYROOM_LOCALES = {
         '${0} 将 ${1} 移出了房间': '${0} 將 ${1} 移出了房間',
         '${0} 禁言了 ${1}': '${0} 禁言了 ${1}',
         '${0} 解除了 ${1} 的禁言': '${0} 解除了 ${1} 的禁言',
+        '${0} 设置了房间密码': '${0} 設定了房間密碼',
+        '${0} 取消了房间密码': '${0} 取消了房間密碼',
         // server errors (key/args protocol)
         '错误': '錯誤',
         '服务器房间数量已达上限，请稍后再试': '伺服器房間數量已達上限，請稍後再試',
@@ -154,5 +174,7 @@ export const SILLYROOM_LOCALES = {
         '只有房主可以执行此操作': '只有房主可以執行此操作',
         '你已被禁言，无法发言': '你已被禁言，無法發言',
         '目标成员不在房间中': '目標成員不在房間中',
+        '房间 ${0} 已设置密码，请输入密码加入': '房間 ${0} 已設定密碼，請輸入密碼加入',
+        '房间密码不正确': '房間密碼不正確',
     },
 };

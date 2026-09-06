@@ -17,6 +17,10 @@ const STORAGE = {
     aiBcast: 'sillyroom:aiBcast',
     autoRespond: 'sillyroom:autoRespond',
 };
+// P3-1b: the join password is kept per room so an auto-rejoin (reconnect or
+// refresh) resends it without prompting. Plaintext like every other
+// localStorage secret in ST; cleared on leave/kick/abandon.
+const PASSWORD_PREFIX = 'sillyroom:pass:';
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
@@ -43,6 +47,8 @@ let selfId = null;
 let roomOwner = null;
 /** @type {Set<string>} clientIds muted by the owner */
 let roomMuted = new Set();
+// P3-1b whether the joined room is locked (badge + owner lock button)
+let roomHasPassword = false;
 /** @type {Map<string, {name: string, color: string}>} */
 let members = new Map();
 /** @type {Map<string, {name: string, timer: number}>} */
@@ -92,6 +98,20 @@ function writeStore(key, value) {
     } catch {
         // storage unavailable (private mode); identity just won't persist
     }
+}
+
+// --- P3-1b: per-room join password persistence ------------------------------
+
+function passwordKey(roomCode) {
+    return `${PASSWORD_PREFIX}${roomCode}`;
+}
+
+function storedPassword(roomCode) {
+    return readStore(passwordKey(roomCode));
+}
+
+function storePassword(roomCode, password) {
+    writeStore(passwordKey(roomCode), password ?? '');
 }
 
 function getBaseId() {
@@ -393,12 +413,18 @@ function updateRoomControls() {
     $('#sillyroom_send').prop('disabled', !canChat);
     $('#sillyroom_room_label').text(
         hasRoom
-            ? t`房间：${joinedRoom}` + pendingNote
+            ? t`房间：${joinedRoom}` + (roomHasPassword ? ' 🔒' : '') + pendingNote
             : expectRejoin
                 ? t`房间：${readStore(STORAGE.room)}（等待重连）` + pendingNote
                 : t`未加入房间`,
     );
     $('#sillyroom_member_count').text(hasRoom ? String(members.size) : '0');
+    // P3-1b: the owner's lock control appears in the members bar; the glyph
+    // and tooltip track the room's current lock state
+    $('#sillyroom_lock')
+        .toggle(hasRoom && roomOwner === selfId)
+        .text(roomHasPassword ? '🔒' : '🔓')
+        .attr('title', roomHasPassword ? t`房间已锁定，点击修改或清除密码` : t`设置房间密码`);
 }
 
 function sendWs(payload) {
@@ -559,10 +585,67 @@ function onMessageReceived(messageId, type) {
 
 // ---------------------------------------------------------------------------
 
-function joinRoom(room) {
+// P3-1b: prompts for a locked room's password and rejoins with it. Cancel (or
+// an empty submit) abandons a fresh join — the stored room/password are
+// dropped so the next reconnect does not prompt all over again; when the
+// caller is already in another room (failed switch), that room is kept.
+function promptForPassword(roomCode, wrong) {
+    const message = wrong
+        ? t`密码不正确，请重新输入：`
+        : t`该房间设有密码，请输入：`;
+    const input = window.prompt(`${message}（${roomCode}）`, '');
+    const password = String(input ?? '').trim();
+    if (!password) {
+        if (!joinedRoom) {
+            writeStore(STORAGE.room, '');
+            storePassword(roomCode, '');
+            leaveRoom(false);
+            updateRoomControls();
+        }
+        return;
+    }
+    joinRoom(roomCode, password);
+}
+
+// P3-1b: owner lock control — set/replace/clear the room password. The owner's
+// own copy is stored locally so their own auto-rejoin stays seamless.
+function handleLockClick() {
+    if (!joinedRoom || roomOwner !== selfId) {
+        return;
+    }
+
+    const message = roomHasPassword
+        ? t`房间已锁定，输入新密码可更换，清空则取消密码：`
+        : t`设置房间密码（留空则不设置）：`;
+    const input = window.prompt(message, '');
+    if (input === null) {
+        return;
+    }
+
+    const cleaned = String(input).replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 64);
+    if (!cleaned && !roomHasPassword) {
+        return; // nothing to set and nothing to clear
+    }
+
+    if (cleaned) {
+        storePassword(joinedRoom, cleaned);
+        sendWs({ type: 'setpass', password: cleaned });
+    } else {
+        storePassword(joinedRoom, '');
+        sendWs({ type: 'setpass' });
+    }
+}
+
+function joinRoom(room, password) {
     const roomCode = String(room ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'lobby';
     writeStore(STORAGE.room, roomCode);
-    sendWs({ type: 'join', room: roomCode, clientId: newClientId(), name: getName() });
+    // P3-1b: a freshly typed password is remembered for auto-rejoins; without
+    // one, any stored password for this room is resent as-is
+    if (typeof password === 'string') {
+        storePassword(roomCode, password);
+    }
+    const stored = storedPassword(roomCode);
+    sendWs({ type: 'join', room: roomCode, clientId: newClientId(), name: getName(), ...(stored ? { password: stored } : {}) });
 }
 
 function leaveRoom(notifyServer = true) {
@@ -579,6 +662,8 @@ function leaveRoom(notifyServer = true) {
     // P3-1a: moderation state belongs to the room membership
     roomOwner = null;
     roomMuted.clear();
+    // P3-1b: the lock badge follows the membership
+    roomHasPassword = false;
     closeMemberMenu();
     cancelAutoRespond();
     renderTyping();
@@ -617,6 +702,10 @@ function systemText(msg) {
             return t`${msg.args?.by ?? '?'} 禁言了 ${msg.args?.name ?? '?'}`;
         case 'member_unmuted':
             return t`${msg.args?.by ?? '?'} 解除了 ${msg.args?.name ?? '?'} 的禁言`;
+        case 'room_password_set':
+            return t`${msg.args?.by ?? '?'} 设置了房间密码`;
+        case 'room_password_cleared':
+            return t`${msg.args?.by ?? '?'} 取消了房间密码`;
         default:
             return String(msg?.text ?? '');
     }
@@ -642,6 +731,10 @@ function errorText(msg) {
             return t`你已被禁言，无法发言`;
         case 'err_bad_target':
             return t`目标成员不在房间中`;
+        case 'err_password_required':
+            return t`房间 ${msg.args?.room ?? '?'} 已设置密码，请输入密码加入`;
+        case 'err_wrong_password':
+            return t`房间密码不正确`;
         default:
             return String(msg?.message ?? '');
     }
@@ -681,6 +774,8 @@ function handleMessage(event) {
             // P3-1a: moderation state rides along with the join confirmation
             roomOwner = typeof msg.owner === 'string' ? msg.owner : null;
             roomMuted = new Set(Array.isArray(msg.muted) ? msg.muted : []);
+            // P3-1b: lock badge state
+            roomHasPassword = msg.hasPassword === true;
             const history = Array.isArray(msg.history) ? msg.history : [];
             $('#sillyroom_messages').empty();
             appendSystem(t`已加入房间 ${msg.room}`);
@@ -730,7 +825,11 @@ function handleMessage(event) {
             // P3-1a: owner/mute changes re-badge the chips
             roomOwner = typeof msg.owner === 'string' ? msg.owner : null;
             roomMuted = new Set(Array.isArray(msg.muted) ? msg.muted : []);
+            // P3-1b: lock state can flip while members stay joined; the label
+            // and lock button also need a re-render, not just the chips
+            roomHasPassword = msg.hasPassword === true;
             renderMembers();
+            updateRoomControls();
             break;
         case 'kicked': {
             // P3-1a: the owner removed us from the room. Tell the user, then
@@ -739,6 +838,7 @@ function handleMessage(event) {
             // still possible by typing the room code).
             appendSystem(t`你已被房主移出了房间`);
             toastr.warning(t`你已被房主移出了房间`, t`聊天室`);
+            storePassword(String(readStore(STORAGE.room)), '');
             writeStore(STORAGE.room, '');
             leaveRoom(false);
             outbox.length = 0;
@@ -773,6 +873,10 @@ function handleMessage(event) {
             break;
         case 'error':
             appendSystem(`[${t`错误`}] ${errorText(msg)}`);
+            // P3-1b: locked rooms turn the failed join into a password prompt
+            if (msg.key === 'err_password_required' || msg.key === 'err_wrong_password') {
+                promptForPassword(String(msg.args?.room ?? readStore(STORAGE.room) ?? 'lobby'), msg.key === 'err_wrong_password');
+            }
             break;
         case 'pong':
             break;
@@ -790,7 +894,7 @@ function renderRoomSuggestions(roomList) {
 
     for (const room of roomList) {
         const chip = $('<a class="sillyroom_room_chip" href="javascript:void(0)"></a>')
-            .text(`${room.id} (${room.members})`)
+            .text(`${room.id}${room.hasPassword ? ' 🔒' : ''} (${room.members})`)
             .on('click', () => {
                 $('#sillyroom_room_input').val(room.id);
                 joinRoom(room.id);
@@ -940,6 +1044,7 @@ function buildWindow() {
             </div>
             <div id="sillyroom_members_bar">
                 <span id="sillyroom_room_label"></span>
+                <a id="sillyroom_lock" class="sillyroom_icon" href="javascript:void(0)" style="display:none" title="设置房间密码" data-i18n="[title]设置房间密码">🔒</a>
                 <span class="sillyroom_flex"></span>
                 <span id="sillyroom_members"></span>
             </div>
@@ -1006,12 +1111,17 @@ function buildWindow() {
     });
 
     $('#sillyroom_leave').on('click', () => {
+        // P3-1b: an intentional leave forgets the room AND its password —
+        // rejoining means typing both again
+        storePassword(String(readStore(STORAGE.room) || ''), '');
         writeStore(STORAGE.room, '');
         $('#sillyroom_room_input').val('');
         leaveRoom(true);
         $('#sillyroom_messages').empty();
         $('#sillyroom_rooms').empty();
     });
+
+    $('#sillyroom_lock').on('click', handleLockClick);
 
     $('#sillyroom_send').on('click', sendCurrentInput);
     $('#sillyroom_input').on('keydown', event => {

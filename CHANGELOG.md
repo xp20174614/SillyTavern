@@ -2,6 +2,54 @@
 
 记录本项目将 SillyTavern 改造为多人同房聊天室的版本演进。格式参考 [Keep a Changelog](https://keepachangelog.com/)，迭代计划见 [ITERATION_PLAN.md](./ITERATION_PLAN.md)。
 
+## [SillyRoom 0.10.0] — 2026-09-07
+
+### 迭代 P3-1b：房间密码
+
+**改动内容**
+- `plugins/sillyroom/index.mjs`（服务端，+约 60 行）：
+  - **锁模型**：Room 新增 `password`（内存态，与房主/禁言一致——房间清空或进程重启即失效，不落盘、不进历史）；房主指令 `setpass`（空/缺省=取消锁定），非房主拒绝 `err_not_owner`；设置成功广播 system `room_password_set`/`room_password_cleared`（args `{by}`）并推送成员表
+  - **加入校验**：`handleJoin` 在人数校验之后、`leaveRoom(ws)` 之前校验密码——未带密码拒 `err_password_required`、密码不符拒 `err_wrong_password`（均附 `args:{room}`）；**校验失败提前返回，切换房间的尝试不会把用户踢出当前房间**；失败尝试消耗一个限频令牌（复用 `isRateLimited`，15 次/5s 后拒 `err_rate_limited`），防止单连接爆破密码；密码上限 64 字符（`MAX_PASSWORD_LENGTH` 固定常量，与房间码同理的格式契约）
+  - **状态暴露**：`joined`/`members` 载荷与 hello/REST 房间列表新增 `hasPassword` 布尔字段（锁的存在性公开用于 UI 徽标，密码值永不离开进程）
+- `public/scripts/extensions/sillyroom/index.js`（前端，+约 80 行）：
+  - **密码加入流**：join 携带 localStorage 中该房间的存储密码；服务端 `err_password_required`/`err_wrong_password` 触发 `window.prompt`（区分「需要密码」/「密码不正确，请重新输入」两种文案）→ 输入后携带密码重新 join，成功即持久化 `sillyroom:pass:<room>`；取消/空输入时若不在任何房间则放弃加入（清除存储房间码+密码，避免自动重连反复弹窗），若在其他房间则保持原房间不动
+  - **断线无缝重连**：存储密码随自动重连/刷新自动携带（hello→join 链路），锁房间重连零交互
+  - **房主锁按钮**：成员栏新增 🔓/🔒 图标按钮（仅房主可见，随 owner/hasPassword 状态实时切换）——点击弹 prompt：未锁=设置密码，已锁=输入新密码更换/清空取消；房主设置密码同时写入本地存储，自身重连同样免提示
+  - **徽标**：房间标签「房间：xxx 🔒」、房间建议 chip「xxx 🔒 (N)」；`members` 消息处理补充 `updateRoomControls()` 调用（修复锁状态变化不刷新标签/按钮的 bug——浏览器实测中发现）
+  - 主动离开与被踢时清除该房间存储密码
+- `public/scripts/extensions/sillyroom/locales.js`（+10 键 × 2 语言）：en/zh-tw 词典覆盖全部新文案（锁按钮 tooltip、两种 prompt、两种错误、两类系统消息）
+- `ITERATION_PLAN.md` / `CHANGELOG.md`：状态与记录更新
+
+**改动原因**
+P3-1a 落地了踢人/禁言，但房间本身没有准入控制：任何拿到房间码的人都能进入并干扰。本迭代给房主一把「锁」——设置密码后只有知道密码的人能加入，与既有的首位进房者为房主模型衔接（房主即锁的持有者，移交时锁的管理权随之转移）。密码采用内存态与踢人/禁言保持同一治理语义：房间无人即散，锁自然失效，不存在「永久锁死」风险。
+
+**测试结果**
+- `node --check` 通过（插件/扩展/词典三文件）；服务端启动正常
+- **Node 集成测试 31/31 通过**（测试实例 :8001 / `--dataRoot data-test`）：
+  - 锁基础：joined 载荷 hasPassword 初始 false、首位进房者为房主、setpass 广播 `room_password_set`（args.by 正确）、members 载荷 hasPassword=true、REST status 暴露 hasPassword、**全部载荷不含密码明文** ✓
+  - 加入校验：无密码→`err_password_required`（args.room 正确）、错密码→`err_wrong_password`、失败加入不创建成员资格、正确密码→joined（hasPassword=true）✓
+  - 切换保护：在他房成员尝试错密码加入锁房被拒后，原房间聊天收发照常（未被踢出）✓
+  - 越权：非房主 setpass→`err_not_owner` ✓
+  - 解锁：房主清密码广播 `room_password_cleared`、members hasPassword=false、无密码加入恢复 ✓
+  - 防爆破：连续猜错 15 次 `err_wrong_password` 后第 16 次起 `err_rate_limited` ✓
+  - 内存态：全员离开房间卸载后重新加入无需密码 ✓
+  - 移交回归：房主硬断线后新房主可 setpass/clear；聊天广播、禁言/解禁/踢人全部照常 ✓
+  - 普通房间加入完全不受影响（无 hasPassword 不弹任何交互）✓
+- **双浏览器标签页实测**（测试实例 :8001，界面语言 en）：
+  - A 建房 pwui：👑 chip、🔓 锁按钮（tooltip "Set a room password"）→ 设置密码 `uipw123`：房间标签变「pwui 🔒」、按钮变 🔒（tooltip 变更）、系统行 "locked the room with a password"、localStorage 写入密码 ✓
+  - B（共享存储带密码自动重进，零提示零弹窗）→ 离开（清除存储）→ 手动输码加入：先弹 "This room is locked — enter the password"，输错密码再弹 "Incorrect password — please try again"，输对后成功加入；成员数 2、B 无锁按钮非房主 ✓
+  - B 改名 Bob（rename 链路回归）→ A 端实时收到 chip 与系统行更新；双向消息互通（发送者名/时间正确）✓
+  - **A 刷新断线**：房主自动移交给在房的 Bob（👑 移到 B 的 chip，B 端锁按钮出现）——P3-1a 移交与 P3-1b 锁管理权转移衔接正确；A 带存储密码自动重连成功（0 次 prompt）、🔒 标签保持 ✓
+  - 非 A 房主后锁按钮正确隐藏；房间建议 chip 显示 `pwui 🔒 (2)`；两窗口全程 JS 错误钩子捕获 0 错误；截图确认全部 UI 状态 ✓
+- 测试服务器已停止，`data-test/`、临时测试脚本、测试标签页均已清理；`docker/docker-compose.yml` 的工作区改动仍为本机部署配置，未纳入提交
+
+**已知边界（记录为后续迭代项）**
+- 密码为**内存态**：全员离房或服务器重启后锁失效（与房主/禁言一致）；需要持久锁需把密码写入历史文件，权衡后暂不做（避免「忘记密码永久锁房」）
+- 密码以明文存于 localStorage（与 ST 全部本地配置同级威胁模型，XSS 可读）；多用户模式下 WS 已有会话鉴权，锁用于「同账号多标签页/受信用户之间的准入」而非强安全边界
+- 房主在成员在场时更换/清除密码**不重新校验已在房成员**（成员知晓新密码需房主另行告知）；被踢者若获知新密码仍可手动输码重进（踢出无黑名单，P3-1a 已记录）
+- 防爆破限频为单连接粒度（15 次/5s）：多连接协同爆破不受此约束，多用户模式下可依赖账号体系追责，单用户模式保持本机部署假设
+- `window.prompt` 为原生弹窗，样式不随主题；后续可换成应用内模态框（与 ST 弹窗体系一致），记录为 P4 备选打磨项
+
 ## [SillyRoom 0.9.0] — 2026-09-07
 
 ### 迭代 P3-1a：房主与踢人/禁言（P3-1 第一切片）

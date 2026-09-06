@@ -54,6 +54,9 @@ function envLimit(name, defaultValue, min, max) {
 const MAX_MESSAGE_LENGTH = envLimit('SILLYROOM_MAX_MESSAGE_CHARS', 2000, 100, 20000);
 const MAX_NAME_LENGTH = envLimit('SILLYROOM_MAX_NAME_CHARS', 24, 1, 64);
 const MAX_ROOM_ID_LENGTH = 32; // format contract shared with the persisted-file naming, kept fixed
+// P3-1b: room passwords share the sanitize rules below; the cap stays fixed so
+// every deployment truncates identically (64 leaves room for passphrases)
+const MAX_PASSWORD_LENGTH = 64;
 const MAX_MEMBERS_PER_ROOM = envLimit('SILLYROOM_MAX_MEMBERS', 32, 2, 256);
 const MAX_ROOMS = envLimit('SILLYROOM_MAX_ROOMS', 100, 1, 1000);
 const HISTORY_LIMIT = envLimit('SILLYROOM_HISTORY_LIMIT', 50, 1, 500);
@@ -110,6 +113,7 @@ const roomFlushTimers = new Map();
  * @property {number} createdAt
  * @property {string|null} ownerClientId P3-1a first joiner owns the room; on leave it passes to the earliest remaining member. Memory-only (not persisted)
  * @property {Set<string>} muted P3-1a clientIds muted by the owner; cleared when the member leaves or the room unloads. Memory-only
+ * @property {string|null} password P3-1b join password set by the owner; null unlocks the room. Memory-only like the owner — a room that unloads (everyone leaves) or a server restart forgets it
  * @property {Map<any, Member>} members Keyed by the socket owning the membership
  * @property {Array<object>} history Recent chat messages
  */
@@ -120,6 +124,7 @@ function createRoom(id) {
         createdAt: Date.now(),
         ownerClientId: null,
         muted: new Set(),
+        password: null,
         members: new Map(),
         history: [],
     };
@@ -181,6 +186,14 @@ function sanitizeNonce(value) {
     return cleaned || null;
 }
 
+/**
+ * P3-1b: room join password. Null/empty means "no password supplied" — which
+ * both unlocks a room via setpass and fails the join check on locked rooms.
+ */
+function sanitizePassword(value) {
+    return sanitizeText(value, MAX_PASSWORD_LENGTH);
+}
+
 function send(ws, payload) {
     if (ws && ws.readyState === ws.OPEN) {
         try {
@@ -213,6 +226,9 @@ function listRooms() {
         id: room.id,
         createdAt: room.createdAt,
         members: room.members.size,
+        // P3-1b: the lock's existence is public (helps clients badge chips);
+        // the password itself never leaves the process
+        hasPassword: Boolean(room.password),
     }));
 }
 
@@ -273,6 +289,7 @@ function pushMembers(room) {
         room: room.id,
         owner: room.ownerClientId,
         muted: [...room.muted],
+        hasPassword: Boolean(room.password),
         members: membersList(room),
     });
 }
@@ -475,6 +492,27 @@ function handleJoin(ws, payload) {
         return;
     }
 
+    // P3-1b: locked rooms verify the join password before anything else about
+    // the join is honored. Failed attempts burn a rate-limit token so guessing
+    // passwords is throttled per connection; a failed check returns BEFORE
+    // leaveRoom, so a rejected room switch keeps the caller's current room.
+    if (room.password) {
+        const supplied = sanitizePassword(payload?.password);
+        if (!supplied || supplied !== room.password) {
+            if (isRateLimited(ws)) {
+                send(ws, { type: 'error', key: 'err_rate_limited', message: '发言太快了，请稍作休息' });
+                return;
+            }
+            send(ws, {
+                type: 'error',
+                key: supplied ? 'err_wrong_password' : 'err_password_required',
+                args: { room: roomId },
+                message: supplied ? '房间密码不正确' : `房间 ${roomId} 已设置密码，请输入密码加入`,
+            });
+            return;
+        }
+    }
+
     const clientId = sanitizeClientId(payload?.clientId) ?? crypto.randomUUID();
     const name = sanitizeText(payload?.name, MAX_NAME_LENGTH) ?? `访客-${clientId.slice(0, 4)}`;
     const color = sanitizeColor(payload?.color, clientId);
@@ -498,6 +536,7 @@ function handleJoin(ws, payload) {
         self: { clientId, name, color },
         owner: room.ownerClientId,
         muted: [...room.muted],
+        hasPassword: Boolean(room.password),
         members: membersList(room),
         history: room.history.slice(-HISTORY_LIMIT),
     });
@@ -643,6 +682,39 @@ function handleMute(ws, payload) {
         ? `${ws.member.name} 禁言了 ${target.member.name}`
         : `${ws.member.name} 解除了 ${target.member.name} 的禁言`;
     broadcast(room, { type: 'system', room: room.id, key, args: { name: target.member.name, by: ws.member.name }, text, ts: Date.now() });
+    pushMembers(room);
+}
+
+/**
+ * P3-1b: the owner locks/unlocks the room with a join password. An empty or
+ * missing password clears the lock. The password lives in memory only (like
+ * the owner and mutes): it is never broadcast, logged, or persisted, and it
+ * disappears when the room unloads or the process restarts. Everyone in the
+ * room is told that the lock changed; existing members are not re-checked.
+ * @param {any} ws The owner's socket
+ * @param {object} payload {password?}
+ * @returns {void}
+ */
+function handleSetpass(ws, payload) {
+    const room = ws.room;
+    if (!room || !ws.member) {
+        send(ws, { type: 'error', key: 'err_not_in_room', message: '请先加入房间' });
+        return;
+    }
+
+    if (room.ownerClientId !== ws.member.clientId) {
+        send(ws, { type: 'error', key: 'err_not_owner', message: '只有房主可以设置房间密码' });
+        return;
+    }
+
+    const password = sanitizePassword(payload?.password);
+    room.password = password;
+
+    const key = password ? 'room_password_set' : 'room_password_cleared';
+    const text = password
+        ? `${ws.member.name} 设置了房间密码`
+        : `${ws.member.name} 取消了房间密码`;
+    broadcast(room, { type: 'system', room: room.id, key, args: { by: ws.member.name }, text, ts: Date.now() });
     pushMembers(room);
 }
 
@@ -863,6 +935,9 @@ function onMessage(ws, raw) {
             break;
         case 'mute':
             handleMute(ws, payload);
+            break;
+        case 'setpass':
+            handleSetpass(ws, payload);
             break;
         case 'typing':
             handleTyping(ws, payload);
