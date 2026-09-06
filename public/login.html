@@ -58,9 +58,21 @@
                             <div id="passwordEntryBlock" style="display:none;"
                                 class="flex-container flexFlowColumn alignItemsCenter">
                                 <input id="userPassword" class="text_pole" type="password" placeholder="Password" autocomplete="current-password">
-                                <a id="recoverPassword" href="#" onclick="return false;">Forgot password?</a>
+                                <div class="flex-container flexGap10">
+                                    <a id="recoverPassword" href="#" onclick="return false;">Forgot password?</a>
+                                    <a id="openRegister" href="#" onclick="return false;">Create account</a>
+                                </div>
                                 <div class="flex-container">
                                     <div id="loginButton" class="menu_button">Login</div>
+                                </div>
+                            </div>
+                            <div id="registerEntryBlock" style="display:none;" class="flex-container flexFlowColumn alignItemsCenter">
+                                <input id="registerHandle" class="text_pole" type="text" placeholder="New user handle" autocomplete="username">
+                                <input id="registerName" class="text_pole" type="text" placeholder="Display name (optional)" autocomplete="name">
+                                <input id="registerPassword" class="text_pole" type="password" placeholder="New password" autocomplete="new-password">
+                                <div class="flex-container flexGap10">
+                                    <div id="registerButton" class="menu_button">Register</div>
+                                    <div id="cancelRegister" class="menu_button">Back to login</div>
                                 </div>
                             </div>
                             <div id="passwordRecoveryBlock" style="display:none;" class="flex-container flexFlowColumn alignItemsCenter">

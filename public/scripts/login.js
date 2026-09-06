@@ -100,6 +100,48 @@ async function sendRecoveryPart2(handle, code, newPassword) {
 }
 
 /**
+ * Registers a new user account.
+ * @param {string} handle User handle
+ * @param {string} name Display name
+ * @param {string} password Password
+ * @returns {Promise<void>}
+ */
+async function performRegister(handle, name, password) {
+    const payload = {
+        handle: String(handle || '').trim(),
+        name: String(name || '').trim() || String(handle || '').trim(),
+        password: String(password || ''),
+    };
+
+    if (!payload.handle || !payload.password) {
+        return displayError('Handle and password are required');
+    }
+
+    try {
+        const response = await fetch('/api/users/register', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken,
+            },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            return displayError(errorData.error || 'An error occurred');
+        }
+
+        $('#userHandle').val(payload.handle);
+        $('#userPassword').val(payload.password);
+        await performLogin(payload.handle, payload.password);
+    } catch (error) {
+        console.error('Error registering:', error);
+        displayError(String(error));
+    }
+}
+
+/**
  * Attempts to log in the user.
  * @param {string} handle User's handle
  * @param {string} password User's password
@@ -149,22 +191,11 @@ async function onUserSelected(user) {
         return await performLogin(user.handle, '');
     }
 
+    $('#userHandle').val(user.handle);
+    $('#userPassword').val('');
+    $('#registerEntryBlock').hide();
     $('#passwordRecoveryBlock').hide();
     $('#passwordEntryBlock').show();
-    $('#loginButton').off('click').on('click', async () => {
-        const password = String($('#userPassword').val());
-        await performLogin(user.handle, password);
-    });
-
-    $('#recoverPassword').off('click').on('click', async () => {
-        await sendRecoveryPart1(user.handle);
-    });
-
-    $('#sendRecovery').off('click').on('click', async () => {
-        const code = String($('#recoveryCode').val());
-        const newPassword = String($('#newPassword').val());
-        await sendRecoveryPart2(user.handle, code, newPassword);
-    });
 
     displayError('');
 }
@@ -200,8 +231,30 @@ function redirectToHome() {
  * Hides the password entry block and shows the password recovery block.
  */
 function showRecoveryBlock() {
+    $('#registerEntryBlock').hide();
     $('#passwordEntryBlock').hide();
     $('#passwordRecoveryBlock').show();
+    displayError('');
+}
+
+/**
+ * Shows register block.
+ */
+function showRegisterBlock() {
+    $('#passwordRecoveryBlock').hide();
+    $('#passwordEntryBlock').hide();
+    $('#registerEntryBlock').show();
+    $('#registerHandle').val(String($('#userHandle').val() || ''));
+    displayError('');
+}
+
+/**
+ * Hides register block and shows login block.
+ */
+function hideRegisterBlock() {
+    $('#registerEntryBlock').hide();
+    $('#passwordRecoveryBlock').hide();
+    $('#passwordEntryBlock').show();
     displayError('');
 }
 
@@ -210,6 +263,7 @@ function showRecoveryBlock() {
  */
 function onCancelRecoveryClick() {
     $('#passwordRecoveryBlock').hide();
+    $('#registerEntryBlock').hide();
     $('#passwordEntryBlock').show();
     displayError('');
 }
@@ -220,7 +274,10 @@ function onCancelRecoveryClick() {
  */
 function configureNormalLogin(userList) {
     console.log('Discreet login is disabled');
-    $('#handleEntryBlock').hide();
+    $('#handleEntryBlock').show();
+    $('#passwordEntryBlock').show();
+    $('#registerEntryBlock').hide();
+    $('#passwordRecoveryBlock').hide();
     $('#normalLoginPrompt').show();
     $('#discreetLoginPrompt').hide();
     console.log(userList);
@@ -246,24 +303,8 @@ function configureDiscreetLogin() {
     $('#discreetLoginPrompt').show();
     $('#userList').hide();
     $('#passwordRecoveryBlock').hide();
+    $('#registerEntryBlock').hide();
     $('#passwordEntryBlock').show();
-    $('#loginButton').off('click').on('click', async () => {
-        const handle = String($('#userHandle').val());
-        const password = String($('#userPassword').val());
-        await performLogin(handle, password);
-    });
-
-    $('#recoverPassword').off('click').on('click', async () => {
-        const handle = String($('#userHandle').val());
-        await sendRecoveryPart1(handle);
-    });
-
-    $('#sendRecovery').off('click').on('click', async () => {
-        const handle = String($('#userHandle').val());
-        const code = String($('#recoveryCode').val());
-        const newPassword = String($('#newPassword').val());
-        await sendRecoveryPart2(handle, code, newPassword);
-    });
 }
 
 (async function () {
@@ -277,11 +318,36 @@ function configureDiscreetLogin() {
     } else {
         configureNormalLogin(userList);
     }
+    $('#loginButton').off('click').on('click', async () => {
+        const handle = String($('#userHandle').val());
+        const password = String($('#userPassword').val());
+        await performLogin(handle, password);
+    });
+    $('#recoverPassword').off('click').on('click', async () => {
+        const handle = String($('#userHandle').val());
+        await sendRecoveryPart1(handle);
+    });
+    $('#sendRecovery').off('click').on('click', async () => {
+        const handle = String($('#userHandle').val());
+        const code = String($('#recoveryCode').val());
+        const newPassword = String($('#newPassword').val());
+        await sendRecoveryPart2(handle, code, newPassword);
+    });
+    $('#openRegister').off('click').on('click', showRegisterBlock);
+    $('#cancelRegister').off('click').on('click', hideRegisterBlock);
+    $('#registerButton').off('click').on('click', async () => {
+        const handle = String($('#registerHandle').val());
+        const name = String($('#registerName').val());
+        const password = String($('#registerPassword').val());
+        await performRegister(handle, name, password);
+    });
     document.getElementById('shadow_popup').style.opacity = '';
     $('#cancelRecovery').on('click', onCancelRecoveryClick);
     $(document).on('keydown', (evt) => {
         if (evt.key === 'Enter' && document.activeElement.tagName === 'INPUT') {
-            if ($('#passwordRecoveryBlock').is(':visible')) {
+            if ($('#registerEntryBlock').is(':visible')) {
+                $('#registerButton').trigger('click');
+            } else if ($('#passwordRecoveryBlock').is(':visible')) {
                 $('#sendRecovery').trigger('click');
             } else {
                 $('#loginButton').trigger('click');

@@ -8180,6 +8180,51 @@
         </div>
     </div>
 
+    <div id="shared_rooms_sidebar" class="flex-container flexFlowColumn">
+        <div class="shared_rooms_sidebar_header">
+            <strong data-i18n="Shared Rooms">Shared Rooms</strong>
+            <div id="shared_rooms_sidebar_refresh" class="menu_button fa-solid fa-rotate-right" title="Refresh shared rooms" data-i18n="[title]Refresh shared rooms"></div>
+        </div>
+        <div class="shared_rooms_sidebar_section">
+            <small class="opacity70p" data-i18n="Create room">Create room</small>
+            <div class="flex-container flexGap5">
+                <input id="shared_rooms_sidebar_room_name" class="text_pole flex1" type="text" placeholder="Room name" data-i18n="[placeholder]Room name">
+                <select id="shared_rooms_sidebar_visibility" class="text_pole widthUnset">
+                    <option value="invite">invite</option>
+                    <option value="public">public</option>
+                </select>
+                <div id="shared_rooms_sidebar_create" class="menu_button fa-solid fa-plus" title="Create room" data-i18n="[title]Create room"></div>
+            </div>
+        </div>
+        <div class="shared_rooms_sidebar_section">
+            <small class="opacity70p" data-i18n="Created by me">Created by me</small>
+            <div id="shared_rooms_created_list" class="shared_rooms_sidebar_list" data-empty_text="No rooms" data-i18n="[data-empty_text]No rooms"></div>
+        </div>
+        <div class="shared_rooms_sidebar_section">
+            <small class="opacity70p" data-i18n="Joined rooms">Joined rooms</small>
+            <div id="shared_rooms_joined_list" class="shared_rooms_sidebar_list" data-empty_text="No rooms" data-i18n="[data-empty_text]No rooms"></div>
+        </div>
+        <div class="shared_rooms_sidebar_section">
+            <small class="opacity70p" data-i18n="Invite users to selected room">Invite users to selected room</small>
+            <div class="flex-container flexGap5">
+                <select id="shared_rooms_sidebar_user_select" class="text_pole flex1"></select>
+                <div id="shared_rooms_sidebar_invite" class="menu_button fa-solid fa-user-plus" title="Invite user" data-i18n="[title]Invite user"></div>
+            </div>
+        </div>
+        <div class="shared_rooms_sidebar_section">
+            <small class="opacity70p" data-i18n="Add NPC to selected room">Add NPC to selected room</small>
+            <div class="flex-container flexGap5">
+                <select id="shared_rooms_sidebar_npc_select" class="text_pole flex1"></select>
+                <div id="shared_rooms_sidebar_add_npc" class="menu_button fa-solid fa-user-astronaut" title="Add NPC" data-i18n="[title]Add NPC"></div>
+            </div>
+        </div>
+        <div class="shared_rooms_sidebar_section">
+            <small class="opacity70p" data-i18n="NPCs in current room">NPCs in current room</small>
+            <div id="shared_rooms_current_npcs" class="shared_rooms_sidebar_list" data-empty_text="No NPC in room" data-i18n="[data-empty_text]No NPC in room"></div>
+            <small id="shared_rooms_npc_target_hint" class="opacity70p" data-i18n="Click an NPC to make them reply">Click an NPC to make them reply</small>
+        </div>
+    </div>
+
     <!-- Area for hidden data lists for secrets autosuggests -->
     <div id="secrets_datalists" class="displayNone"></div>
 

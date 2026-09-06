@@ -5,15 +5,29 @@ import express from 'express';
 import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getIpAddress, retryAfter } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
-import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAccountVersion } from '../users.js';
+import {
+    KEY_PREFIX,
+    getUserAvatar,
+    toKey,
+    getPasswordHash,
+    getPasswordSalt,
+    getAccountVersion,
+    getAllUserHandles,
+    getUserDirectories,
+    ensurePublicDirectoriesExist,
+} from '../users.js';
+import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 
 const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
+const ENABLE_ACCOUNTS = getConfigValue('enableUserAccounts', false, 'boolean');
+const ENABLE_REGISTRATION = getConfigValue('accounts.enableRegistration', false, 'boolean');
 const PREFER_REAL_IP_HEADER = getConfigValue('rateLimiting.preferRealIpHeader', false, 'boolean');
 const LOGIN_POINTS = getConfigValue('rateLimiting.accountsLoginMaxAttempts', 5, 'number');
 const RECOVER_POINTS = getConfigValue('rateLimiting.accountsRecoverMaxAttempts', 5, 'number');
 const MFA_CACHE = new Cache(5 * 60 * 1000);
 
 const generateRecoveryCode = () => Array.from({ length: 6 }, () => crypto.randomInt(0, 10)).join('');
+const slugify = (text) => String(text ?? '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
 export const router = express.Router();
 const loginLimiter = new RateLimiterMemory({
@@ -103,6 +117,59 @@ router.post('/login', async (request, response) => {
         }
 
         console.error('Login failed:', error);
+        return response.sendStatus(500);
+    }
+});
+
+router.post('/register', async (request, response) => {
+    try {
+        if (!ENABLE_ACCOUNTS) {
+            return response.status(403).json({ error: 'User accounts are disabled' });
+        }
+
+        if (!ENABLE_REGISTRATION) {
+            return response.status(403).json({ error: 'User registration is disabled' });
+        }
+
+        if (!request.body?.handle || !request.body?.name || typeof request.body.password !== 'string') {
+            return response.status(400).json({ error: 'Missing required fields' });
+        }
+
+        const rawHandle = slugify(request.body.handle);
+        if (!rawHandle) {
+            return response.status(400).json({ error: 'Invalid handle' });
+        }
+
+        const handles = await getAllUserHandles();
+        if (handles.includes(rawHandle)) {
+            return response.status(409).json({ error: 'User already exists' });
+        }
+
+        const salt = getPasswordSalt();
+        const password = request.body.password ? getPasswordHash(request.body.password, salt) : '';
+        const user = {
+            handle: rawHandle,
+            name: String(request.body.name).trim() || rawHandle,
+            created: Date.now(),
+            password,
+            salt,
+            admin: false,
+            enabled: true,
+        };
+
+        await storage.setItem(toKey(rawHandle), user);
+        await ensurePublicDirectoriesExist();
+        const directories = getUserDirectories(rawHandle);
+        await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS]);
+
+        if (request.session) {
+            request.session.handle = user.handle;
+            request.session.version = getAccountVersion(user);
+        }
+
+        return response.status(201).json({ handle: user.handle, name: user.name });
+    } catch (error) {
+        console.error('Register failed:', error);
         return response.sendStatus(500);
     }
 });
