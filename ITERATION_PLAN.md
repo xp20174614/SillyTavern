@@ -36,7 +36,10 @@
 
 | 状态 | 任务 | 说明 |
 |------|------|------|
-| [ ] | **P3-1 房间管理增强** | 房主权限（踢人/禁言）、房间密码、房间列表 UI |
+| [已完成] | **P3-1a 房主与踢人/禁言** | 首位进房者为房主（👑 徽标），房主离开/断开时转移给最早加入的剩余成员；房主点击成员 chip 弹出菜单：移出房间（被移出者收到 kicked 通知、清除自动重进）、禁言/解除禁言（被禁言者发言被拒 `err_muted`，typing 不受限）；成员 chip 显示 🔇 禁言标记；协议：joined/members 附 owner+muted、kick/mute 指令、kicked 事件、member_kicked/member_muted/member_unmuted 系统消息与 err_not_owner/err_bad_target/err_muted 错误（均带 en/zh-tw 词典）；房主与禁言为内存态（不落盘，重启后首位进房者重新成为房主） |
+| [ ] | **P3-1b 房间密码** | 房主可设置房间密码，加入时校验 |
+| [ ] | **P3-1c 房间列表 UI 增强** | 基础活跃房间建议 chips 已随 P0-2 落地（hello/REST 驱动）；增强项：手动刷新、按人数排序等 |
+| [ ] | **P3-3 Route B 侧栏轮询 CSRF 修复**（建议人工审核后再执行） | 8fa782b52 并入的 Shared Rooms 侧栏原型（group-chats.js + tools/room-service）以 2s/4s 轮询 room-service POST 端点，请求缺少 CSRF token 全部被 403 拒绝（服务端刷 ForbiddenError 日志、面板实际不可用）——修复方向：轮询请求补 `getRequestHeaders()` CSRF 头或确认 room-service 路由的 CSRF 豁免策略；属 Route B 原型代码 + 核心文件 group-chats.js，需人工确认方案 |
 | [已完成] | **P3-2 安全加固** | WS 握手鉴权（P1-2 已完成：多用户模式下校验 ST 会话 Cookie，未登录 403）；Origin 校验（P3-2）：升级链路前置 `isOriginAllowed()`——无 Origin（非浏览器客户端）放行、与 Host 同源（默认端口归一化，无端口 Host 兼容 TLS 终结代理）放行、`SILLYROOM_ALLOWED_ORIGINS` 白名单（精确来源锁端口 / 裸主机名任意端口 / `*` 全放行告警）放行，其余 403，防跨站 WebSocket 劫持；限频参数化（P3-2）：9 个 `SILLYROOM_*` 环境变量（限频/消息与昵称长度/人数/房间数/历史/心跳/帧上限），未设置用默认、非法回退、越界钳位，启动日志打印生效值；部署指引（P3-2）：`plugins/sillyroom/SECURITY.md`——防护一览、环境变量参考、Origin 规则与反向代理注意点、公网上线检查清单（nginx/caddy 完整配置示例留 P4-2） |
 
 ## P4 部署运维

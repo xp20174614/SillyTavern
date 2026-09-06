@@ -2,6 +2,53 @@
 
 记录本项目将 SillyTavern 改造为多人同房聊天室的版本演进。格式参考 [Keep a Changelog](https://keepachangelog.com/)，迭代计划见 [ITERATION_PLAN.md](./ITERATION_PLAN.md)。
 
+## [SillyRoom 0.9.0] — 2026-09-07
+
+### 迭代 P3-1a：房主与踢人/禁言（P3-1 第一切片）
+
+**改动内容**
+- `plugins/sillyroom/index.mjs`（服务端，+约 120 行）：
+  - **房主模型**：Room 新增 `ownerClientId`（内存态，不落盘）——首位进房者成为房主（房间复现时同理），后续加入者永不抢占；房主离开/断开时自动转移给**最早加入**的剩余成员（`joinedAt` 排序），房间清空即复位
+  - **踢人**：`{type:'kick', clientId}`——仅房主可调用（否则 `err_not_owner`）、不能作用于自己/不存在成员（`err_bad_target`）；目标先收到 `{type:'kicked', by}` 私有通知再被移出，房间广播 `member_kicked` 系统消息（args `{name, by}`）替代普通离房文案
+  - **禁言**：`{type:'mute', clientId, muted}`——同样的权限/目标校验；`Room.muted` 内存 Set，广播 `member_muted`/`member_unmuted` 系统消息并推送成员表；被禁言者发言在限频检查**之前**拒绝（`err_muted`，不消耗限频窗口），typing/进出场不受影响；成员离开即解除其禁言
+  - **协议扩展（向后兼容）**：`joined`/`members` 载荷新增 `owner` + `muted` 字段；`onMessage` 新增 `kick`/`mute` 分支；`findMember()` 辅助函数；未知字段对旧客户端无影响
+- `public/scripts/extensions/sillyroom/index.js`（前端，+约 120 行）：
+  - **状态同步**：`joined`/`members` 消息维护 `roomOwner`/`roomMuted`；离开房间即复位并关闭成员菜单
+  - **成员 chip 徽标**：房主 chip 显示 👑（所有成员可见）、被禁言 chip 显示 🔇；自己是房主时其他成员 chip 变为可点击（hover 高亮 + 「点击管理成员」tooltip）
+  - **管理菜单**：点击成员 chip 弹出锚定菜单（`#sillyroom_member_menu`，fixed 定位防裁剪，点击页面其他处自动关闭）——「🔇 禁言/解除禁言」（按当前状态切换文案）与「🚪 移出房间」；非房主与自己的 chip 无菜单
+  - **kicked 事件处理**：消息流显示「你已被房主移出了房间」+ toastr 警告；**清除 localStorage 存储的房间码**（断线自动重进不会把人拉回来，手动输码仍可重进）；本地复位房间状态、清空离线补发缓存
+  - `systemText`/`errorText` 新增 6 个 key 的本地化分支（未知 key 仍回退服务端原文）
+- `public/scripts/extensions/sillyroom/locales.js`（+21 键 × 2 语言）：en/zh-tw 词典覆盖全部新文案（徽标 tooltip、菜单按钮、kicked 提示、3 类系统消息、3 类错误）
+- `public/scripts/extensions/sillyroom/style.css`（+57 行）：可点击 chip 的 hover 态、👑/🔇 徽标、管理菜单（背景/边框/阴影全走 ST 主题变量，`color-mix` 保证任意主题对比度）
+- `ITERATION_PLAN.md`：P3-1 拆分为 P3-1a（本轮）/P3-1b（房间密码）/P3-1c（房间列表增强）；新增 P3-3（Route B 侧栏轮询 CSRF 修复建议）
+
+**改动原因**
+P0~P3-2 打通了聊天、历史、离线与安全边界，但房间没有任何治理手段：捣乱成员无法移出、无法禁言，房间归属也不明确。本迭代引入「首位进房者为房主」的零配置治理模型——无需注册/权限管理界面，房主获得移出与禁言两个最小必要权限，离开时房主身份自然移交，保证房间始终有主。
+
+**测试结果**
+- `node --check` 通过（插件/扩展/词典三文件）；服务端启动正常
+- **Node 集成测试 20/20 通过**（测试实例 :8001 / `--dataRoot data-test`）：
+  - 房主归属：首位进房者获得 owner（joined 载荷）、后来者不抢占、joined.muted 初始为空 ✓
+  - 禁言：system `member_muted`（args name/by 正确）、members 载荷携带 muted 集、被禁言发言拒 `err_muted` 且房间无广播、解禁后广播互通（id 一致）✓
+  - 越权：非房主 kick/mute 均 `err_not_owner`、房主踢自己与不存在成员均 `err_bad_target` ✓
+  - 踢人：目标收 `kicked {by}`、房间收 `member_kicked`、成员表正确移除；被踢者可手动重进（不恢复房主、禁言已清）✓
+  - 转移：房主主动离开与**硬断线**两种路径均把 owner 移交给最早加入的剩余成员；新成员在转移后加入不改变归属；转移后旧成员无管理权 ✓
+  - 测试脚本自身曾因 hello 竞态与自广播未排空误报 5 例，修正用例后全绿（协议行为本身无缺陷）
+- **双浏览器标签页实测**（测试实例 :8001）：
+  - A 进房 chip 显示「👑（我）」；B 进房后双方窗口成员数 2、B 窗口中 A 的 chip 带 👑 ✓
+  - A 点击 B 的 chip 弹出菜单（成员名 + 🔇禁言 + 🚪移出房间）→ 禁言后两窗口 B chip 均显示 🔇、系统行「禁言了」；B 发言得「[错误] 你已被禁言，无法发言」✓
+  - A 解禁 → B 发言成功且 A 实时收到 ✓
+  - A 踢人 → B 端「你已被房主移出了房间」+ 房间标签复位「未加入房间」+ 输入禁用 + **localStorage 房间码已清空**（刷新不自动重进）；A 端「将 访客-2fe2 移出了房间」+ 成员数回落 1 ✓
+  - B 手动输码重进成功，A 仍持 👑、B 无任何徽标（重进自动解除禁言）✓
+  - 两窗口全程 JS 错误钩子捕获 0 错误；截图确认徽标/系统消息/窗口渲染正常
+- 测试服务器已停止，`data-test/`、临时测试脚本、测试标签页均已清理；`docker/docker-compose.yml` 的工作区改动仍为本机部署配置，未纳入提交
+
+**已知边界（记录为后续迭代项）**
+- 房主与禁言均为**内存态**：服务器重启后房主归属重置（首位进房者）、禁言全部解除；持久化归属需要把 owner 写入历史文件，收益低暂不做
+- 被踢成员无黑名单：手动输码即可重新进入（踢出只保证「断开 + 不自动重进」）；需要强制权限用 P3-1b 房间密码或 P3-3 后的账号绑定
+- 房主无法主动移交（除离开/断开的自动移交）；点击自己 chip 无菜单（自己的出路是离开房间）
+- **既有问题观察（与 SillyRoom 无关）**：8fa782b52 并入的 Route B「Shared Rooms」侧栏原型以 2s/4s 轮询 room-service 端点，每个请求都因缺少 CSRF token 被 403 拒绝（测试窗口内产生数百条服务端 ForbiddenError 日志，已用 curl 复现定位）；该面板实际不可用。已记录为计划 P3-3，建议人工审核后单独修复
+
 ## [SillyRoom 0.8.0] — 2026-09-07
 
 ### 迭代 P3-2：安全加固（Origin 校验 + 限频参数化 + 部署指引）

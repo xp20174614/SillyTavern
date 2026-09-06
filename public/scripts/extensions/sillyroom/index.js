@@ -39,6 +39,10 @@ let reconnectAttempt = 0;
 let intentionallyClosed = false;
 let joinedRoom = null;
 let selfId = null;
+// P3-1a room moderation state (mirrors the server's joined/members payloads)
+let roomOwner = null;
+/** @type {Set<string>} clientIds muted by the owner */
+let roomMuted = new Set();
 /** @type {Map<string, {name: string, color: string}>} */
 let members = new Map();
 /** @type {Map<string, {name: string, timer: number}>} */
@@ -138,9 +142,76 @@ function renderMembers() {
     for (const [clientId, member] of members) {
         const chip = $('<span class="sillyroom_member_chip"></span>');
         chip.append($('<span class="sillyroom_member_dot"></span>').css('background-color', member.color));
+        // P3-1a: crown marks the room owner, the speaker icon a mute
+        if (clientId === roomOwner) {
+            chip.append($('<span class="sillyroom_owner_badge"></span>').attr('title', t`房主`).text('👑'));
+        }
+        if (roomMuted.has(clientId)) {
+            chip.append($('<span class="sillyroom_muted_badge"></span>').attr('title', t`已禁言`).text('🔇'));
+        }
         chip.append($('<span></span>').text(member.name + (clientId === selfId ? t`（我）` : '')));
+        if (roomOwner === selfId && clientId !== selfId) {
+            chip.addClass('sillyroom_moderatable')
+                .attr('title', t`点击管理成员`)
+                .on('click', function () {
+                    openMemberMenu(clientId, this);
+                });
+        }
         container.append(chip);
     }
+}
+
+// --- P3-1a: owner member management (kick / mute) ----------------------------
+
+function closeMemberMenu() {
+    $('#sillyroom_member_menu').remove();
+    $(document).off('click.sillyroom_member_menu');
+}
+
+/**
+ * Opens the owner's moderation menu anchored to a member chip. A no-op for
+ * non-owners and for the owner's own chip (leaving is the owner's way out).
+ * @param {string} clientId Target member
+ * @param {HTMLElement} anchor The clicked chip element
+ */
+function openMemberMenu(clientId, anchor) {
+    closeMemberMenu();
+    const member = members.get(clientId);
+    if (!member || roomOwner !== selfId || clientId === selfId) {
+        return;
+    }
+
+    const isMuted = roomMuted.has(clientId);
+    const menu = $('<div id="sillyroom_member_menu"></div>');
+    menu.append($('<span class="sillyroom_member_menu_name"></span>').text(member.name));
+    menu.append(
+        $('<button class="sillyroom_member_menu_button"></button>')
+            .text(`🔇 ${isMuted ? t`解除禁言` : t`禁言`}`)
+            .on('click', () => {
+                sendWs({ type: 'mute', clientId, muted: !isMuted });
+                closeMemberMenu();
+            }),
+    );
+    menu.append(
+        $('<button class="sillyroom_member_menu_button danger"></button>')
+            .text(`🚪 ${t`移出房间`}`)
+            .on('click', () => {
+                sendWs({ type: 'kick', clientId });
+                closeMemberMenu();
+            }),
+    );
+
+    $('body').append(menu);
+    const rect = anchor.getBoundingClientRect();
+    const menuWidth = menu.outerWidth() ?? 160;
+    menu.css({
+        left: Math.max(4, Math.min(rect.left, window.innerWidth - menuWidth - 4)),
+        top: Math.min(rect.bottom + 4, window.innerHeight - (menu.outerHeight() ?? 100) - 4),
+    });
+    // Defer so the opening click never closes the menu instantly
+    setTimeout(() => {
+        $(document).on('click.sillyroom_member_menu', closeMemberMenu);
+    }, 0);
 }
 
 function scrollToBottom() {
@@ -505,6 +576,10 @@ function leaveRoom(notifyServer = true) {
     joinedRoom = null;
     members.clear();
     typingUsers.clear();
+    // P3-1a: moderation state belongs to the room membership
+    roomOwner = null;
+    roomMuted.clear();
+    closeMemberMenu();
     cancelAutoRespond();
     renderTyping();
     renderMembers();
@@ -536,6 +611,12 @@ function systemText(msg) {
             return t`${msg.args?.name ?? '?'} 离开了房间`;
         case 'member_renamed':
             return t`${msg.args?.oldName ?? '?'} 改名为 ${msg.args?.name ?? '?'}`;
+        case 'member_kicked':
+            return t`${msg.args?.by ?? '?'} 将 ${msg.args?.name ?? '?'} 移出了房间`;
+        case 'member_muted':
+            return t`${msg.args?.by ?? '?'} 禁言了 ${msg.args?.name ?? '?'}`;
+        case 'member_unmuted':
+            return t`${msg.args?.by ?? '?'} 解除了 ${msg.args?.name ?? '?'} 的禁言`;
         default:
             return String(msg?.text ?? '');
     }
@@ -555,6 +636,12 @@ function errorText(msg) {
             return t`无效的消息格式`;
         case 'err_unknown_type':
             return t`未知的消息类型`;
+        case 'err_not_owner':
+            return t`只有房主可以执行此操作`;
+        case 'err_muted':
+            return t`你已被禁言，无法发言`;
+        case 'err_bad_target':
+            return t`目标成员不在房间中`;
         default:
             return String(msg?.message ?? '');
     }
@@ -591,6 +678,9 @@ function handleMessage(event) {
             joinedRoom = msg.room;
             selfId = msg.self?.clientId ?? null;
             members = new Map((msg.members ?? []).map(m => [m.clientId, m]));
+            // P3-1a: moderation state rides along with the join confirmation
+            roomOwner = typeof msg.owner === 'string' ? msg.owner : null;
+            roomMuted = new Set(Array.isArray(msg.muted) ? msg.muted : []);
             const history = Array.isArray(msg.history) ? msg.history : [];
             $('#sillyroom_messages').empty();
             appendSystem(t`已加入房间 ${msg.room}`);
@@ -637,8 +727,25 @@ function handleMessage(event) {
             break;
         case 'members':
             members = new Map((msg.members ?? []).map(m => [m.clientId, m]));
+            // P3-1a: owner/mute changes re-badge the chips
+            roomOwner = typeof msg.owner === 'string' ? msg.owner : null;
+            roomMuted = new Set(Array.isArray(msg.muted) ? msg.muted : []);
             renderMembers();
             break;
+        case 'kicked': {
+            // P3-1a: the owner removed us from the room. Tell the user, then
+            // reset like an intentional leave — and drop the stored room so
+            // the next reconnect does NOT auto-rejoin (manual re-entry is
+            // still possible by typing the room code).
+            appendSystem(t`你已被房主移出了房间`);
+            toastr.warning(t`你已被房主移出了房间`, t`聊天室`);
+            writeStore(STORAGE.room, '');
+            leaveRoom(false);
+            outbox.length = 0;
+            $('#sillyroom_messages .sillyroom_msg.pending').remove();
+            updateRoomControls();
+            break;
+        }
         case 'chat':
             markTyping(msg.from?.clientId, msg.from?.name, false);
             // P2-2: our own flushed outbox message — drop the ⏳ pending copy,

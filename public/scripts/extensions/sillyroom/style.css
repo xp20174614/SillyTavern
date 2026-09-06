@@ -206,6 +206,59 @@
     white-space: nowrap;
 }
 
+/* P3-1a: owner moderation — clickable chips, owner/mute badges, popup menu */
+.sillyroom_member_chip.sillyroom_moderatable {
+    cursor: pointer;
+}
+
+.sillyroom_member_chip.sillyroom_moderatable:hover {
+    background-color: color-mix(in srgb, var(--SmartThemeBodyColor, #dcdde1) 24%, transparent);
+}
+
+.sillyroom_owner_badge,
+.sillyroom_muted_badge {
+    font-size: 0.85em;
+    line-height: 1;
+}
+
+#sillyroom_member_menu {
+    position: fixed;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 140px;
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    background-color: var(--SmartThemeBlurTintColor, #1f2125);
+    box-shadow: 0 4px 14px var(--SmartThemeShadowColor, rgba(0, 0, 0, 0.4));
+}
+
+.sillyroom_member_menu_name {
+    font-weight: 600;
+    padding: 2px 4px 6px;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, #dcdde1) 20%, transparent);
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sillyroom_member_menu_button {
+    text-align: left;
+    padding: 5px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--SmartThemeBodyColor, #dcdde1);
+    cursor: pointer;
+}
+
+.sillyroom_member_menu_button:hover {
+    background-color: color-mix(in srgb, var(--SmartThemeBodyColor, #dcdde1) 15%, transparent);
+}
+
 .sillyroom_member_dot {
     width: 7px;
     height: 7px;

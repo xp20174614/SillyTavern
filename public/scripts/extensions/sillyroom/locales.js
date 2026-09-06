@@ -31,6 +31,14 @@ export const SILLYROOM_LOCALES = {
         '（我）': ' (me)',
         '未加入房间': 'Not in a room',
         '暂无活跃房间，输入房间码创建': 'No active rooms — type a room code to create one',
+        // owner moderation (P3-1a)
+        '房主': 'Room owner',
+        '已禁言': 'Muted',
+        '点击管理成员': 'Click to manage this member',
+        '禁言': 'Mute',
+        '解除禁言': 'Unmute',
+        '移出房间': 'Remove from room',
+        '你已被房主移出了房间': 'You were removed from the room by the owner',
         // messages
         '—— 断线期间的新消息 ——': '—— New messages while offline ——',
         '⏳ 待发送': '⏳ Pending',
@@ -57,6 +65,9 @@ export const SILLYROOM_LOCALES = {
         '${0} 加入了房间': '${0} joined the room',
         '${0} 离开了房间': '${0} left the room',
         '${0} 改名为 ${1}': '${0} renamed to ${1}',
+        '${0} 将 ${1} 移出了房间': '${0} removed ${1} from the room',
+        '${0} 禁言了 ${1}': '${0} muted ${1}',
+        '${0} 解除了 ${1} 的禁言': '${0} unmuted ${1}',
         // server errors (key/args protocol)
         '错误': 'Error',
         '服务器房间数量已达上限，请稍后再试': 'The server has reached its room limit — please try again later',
@@ -65,6 +76,9 @@ export const SILLYROOM_LOCALES = {
         '发言太快了，请稍作休息': 'Sending too fast — take a short break',
         '无效的消息格式': 'Invalid message format',
         '未知的消息类型': 'Unknown message type',
+        '只有房主可以执行此操作': 'Only the room owner can do that',
+        '你已被禁言，无法发言': 'You are muted and cannot speak',
+        '目标成员不在房间中': 'That member is not in the room',
     },
     'zh-tw': {
         // window chrome
@@ -92,6 +106,14 @@ export const SILLYROOM_LOCALES = {
         '（我）': '（我）',
         '未加入房间': '未加入房間',
         '暂无活跃房间，输入房间码创建': '暫無活躍房間，輸入房間碼建立',
+        // owner moderation (P3-1a)
+        '房主': '房主',
+        '已禁言': '已禁言',
+        '点击管理成员': '點擊管理成員',
+        '禁言': '禁言',
+        '解除禁言': '解除禁言',
+        '移出房间': '移出房間',
+        '你已被房主移出了房间': '你已被房主移出了房間',
         // messages
         '—— 断线期间的新消息 ——': '—— 斷線期間的新訊息 ——',
         '⏳ 待发送': '⏳ 待傳送',
@@ -118,6 +140,9 @@ export const SILLYROOM_LOCALES = {
         '${0} 加入了房间': '${0} 加入了房間',
         '${0} 离开了房间': '${0} 離開了房間',
         '${0} 改名为 ${1}': '${0} 改名為 ${1}',
+        '${0} 将 ${1} 移出了房间': '${0} 將 ${1} 移出了房間',
+        '${0} 禁言了 ${1}': '${0} 禁言了 ${1}',
+        '${0} 解除了 ${1} 的禁言': '${0} 解除了 ${1} 的禁言',
         // server errors (key/args protocol)
         '错误': '錯誤',
         '服务器房间数量已达上限，请稍后再试': '伺服器房間數量已達上限，請稍後再試',
@@ -126,5 +151,8 @@ export const SILLYROOM_LOCALES = {
         '发言太快了，请稍作休息': '發言太快了，請稍作休息',
         '无效的消息格式': '無效的訊息格式',
         '未知的消息类型': '未知的訊息類型',
+        '只有房主可以执行此操作': '只有房主可以執行此操作',
+        '你已被禁言，无法发言': '你已被禁言，無法發言',
+        '目标成员不在房间中': '目標成員不在房間中',
     },
 };

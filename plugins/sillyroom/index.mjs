@@ -108,6 +108,8 @@ const roomFlushTimers = new Map();
  * @typedef {object} Room
  * @property {string} id
  * @property {number} createdAt
+ * @property {string|null} ownerClientId P3-1a first joiner owns the room; on leave it passes to the earliest remaining member. Memory-only (not persisted)
+ * @property {Set<string>} muted P3-1a clientIds muted by the owner; cleared when the member leaves or the room unloads. Memory-only
  * @property {Map<any, Member>} members Keyed by the socket owning the membership
  * @property {Array<object>} history Recent chat messages
  */
@@ -116,6 +118,8 @@ function createRoom(id) {
     return {
         id,
         createdAt: Date.now(),
+        ownerClientId: null,
+        muted: new Set(),
         members: new Map(),
         history: [],
     };
@@ -215,20 +219,35 @@ function listRooms() {
 /**
  * Removes a socket from its current room, notifying remaining members.
  * @param {any} ws The socket leaving its room
+ * @param {{by: string}|null} kickInfo P3-1a: when set, the removal is a owner
+ * kick and the room is told so (system key member_kicked) instead of a plain leave
  * @returns {void}
  */
-function leaveRoom(ws) {
+function leaveRoom(ws, kickInfo = null) {
     const room = ws.room;
     if (!room || !ws.member) {
         return;
     }
 
+    const { clientId, name } = ws.member;
     room.members.delete(ws);
-    broadcast(room, { type: 'member_left', room: room.id, clientId: ws.member.clientId });
+    // P3-1a: a departed member's mute no longer applies to them
+    room.muted.delete(clientId);
+
+    // P3-1a: ownership passes to the earliest remaining member (null when empty)
+    if (room.ownerClientId === clientId) {
+        const next = [...room.members.values()].sort((a, b) => a.joinedAt - b.joinedAt)[0];
+        room.ownerClientId = next?.clientId ?? null;
+    }
+
+    broadcast(room, { type: 'member_left', room: room.id, clientId });
     // P2-3: key+args let clients localize the event in their own UI language;
     // text (Chinese) stays as the legacy/fallback rendering.
-    broadcast(room, { type: 'system', room: room.id, key: 'member_left', args: { name: ws.member.name }, text: `${ws.member.name} 离开了房间`, ts: Date.now() });
-    broadcast(room, { type: 'members', room: room.id, members: membersList(room) });
+    const system = kickInfo
+        ? { key: 'member_kicked', args: { name, by: kickInfo.by }, text: `${kickInfo.by} 将 ${name} 移出了房间` }
+        : { key: 'member_left', args: { name }, text: `${name} 离开了房间` };
+    broadcast(room, { type: 'system', room: room.id, ...system, ts: Date.now() });
+    pushMembers(room);
 
     ws.room = null;
     ws.member = null;
@@ -243,12 +262,37 @@ function leaveRoom(ws) {
 }
 
 /**
- * Sends the current room roster to everyone in the room.
+ * Sends the current room roster to everyone in the room. P3-1a: the payload
+ * also carries the owner and the muted set so clients can badge chips.
  * @param {Room} room Target room
  * @returns {void}
  */
 function pushMembers(room) {
-    broadcast(room, { type: 'members', room: room.id, members: membersList(room) });
+    broadcast(room, {
+        type: 'members',
+        room: room.id,
+        owner: room.ownerClientId,
+        muted: [...room.muted],
+        members: membersList(room),
+    });
+}
+
+/**
+ * P3-1a: finds a room member by clientId.
+ * @param {Room} room Target room
+ * @param {string|null} clientId Client id to look up
+ * @returns {{socket: any, member: Member}|null}
+ */
+function findMember(room, clientId) {
+    if (!clientId) {
+        return null;
+    }
+    for (const [socket, member] of room.members) {
+        if (member.clientId === clientId) {
+            return { socket, member };
+        }
+    }
+    return null;
 }
 
 function removeConnection(ws) {
@@ -442,10 +486,18 @@ function handleJoin(ws, payload) {
     ws.member = { clientId, name, color, joinedAt: Date.now() };
     room.members.set(ws, ws.member);
 
+    // P3-1a: the first member of a (re)created room becomes its owner; later
+    // joiners never steal ownership while the owner is present
+    if (!room.ownerClientId) {
+        room.ownerClientId = clientId;
+    }
+
     send(ws, {
         type: 'joined',
         room: room.id,
         self: { clientId, name, color },
+        owner: room.ownerClientId,
+        muted: [...room.muted],
         members: membersList(room),
         history: room.history.slice(-HISTORY_LIMIT),
     });
@@ -458,6 +510,12 @@ function handleJoin(ws, payload) {
 function handleChat(ws, payload) {
     if (!ws.room || !ws.member) {
         send(ws, { type: 'error', key: 'err_not_in_room', message: '请先加入房间后再发言' });
+        return;
+    }
+
+    // P3-1a: muted members may lurk and type but their messages are refused
+    if (ws.room.muted.has(ws.member.clientId)) {
+        send(ws, { type: 'error', key: 'err_muted', message: '你已被禁言，无法发言' });
         return;
     }
 
@@ -517,6 +575,75 @@ function handleRename(ws, payload) {
     ws.member.name = name;
     broadcast(ws.room, { type: 'system', room: ws.room.id, key: 'member_renamed', args: { oldName, name }, text: `${oldName} 改名为 ${name}`, ts: Date.now() });
     pushMembers(ws.room);
+}
+
+/**
+ * P3-1a: room-owner moderation. Only the owner may kick; the owner cannot
+ * target themselves (leaving is the owner's own way out). The kicked socket is
+ * told first (type 'kicked'), then removed like any leaver — the room sees a
+ * member_kicked system event instead of a plain member_left.
+ * @param {any} ws The owner's socket
+ * @param {object} payload {clientId}
+ * @returns {void}
+ */
+function handleKick(ws, payload) {
+    const room = ws.room;
+    if (!room || !ws.member) {
+        return;
+    }
+
+    if (room.ownerClientId !== ws.member.clientId) {
+        send(ws, { type: 'error', key: 'err_not_owner', message: '只有房主可以移出成员' });
+        return;
+    }
+
+    const target = findMember(room, sanitizeClientId(payload?.clientId));
+    if (!target || target.member.clientId === ws.member.clientId) {
+        send(ws, { type: 'error', key: 'err_bad_target', message: '目标成员不在房间中' });
+        return;
+    }
+
+    send(target.socket, { type: 'kicked', room: room.id, by: ws.member.name });
+    leaveRoom(target.socket, { by: ws.member.name });
+}
+
+/**
+ * P3-1a: toggles a member's mute. Mutes are room-scoped and memory-only; they
+ * end when the member leaves, the owner lifts them, or the room unloads.
+ * @param {any} ws The owner's socket
+ * @param {object} payload {clientId, muted}
+ * @returns {void}
+ */
+function handleMute(ws, payload) {
+    const room = ws.room;
+    if (!room || !ws.member) {
+        return;
+    }
+
+    if (room.ownerClientId !== ws.member.clientId) {
+        send(ws, { type: 'error', key: 'err_not_owner', message: '只有房主可以禁言成员' });
+        return;
+    }
+
+    const target = findMember(room, sanitizeClientId(payload?.clientId));
+    const muted = payload?.muted === true;
+    if (!target || target.member.clientId === ws.member.clientId) {
+        send(ws, { type: 'error', key: 'err_bad_target', message: '目标成员不在房间中' });
+        return;
+    }
+
+    if (muted) {
+        room.muted.add(target.member.clientId);
+    } else {
+        room.muted.delete(target.member.clientId);
+    }
+
+    const key = muted ? 'member_muted' : 'member_unmuted';
+    const text = muted
+        ? `${ws.member.name} 禁言了 ${target.member.name}`
+        : `${ws.member.name} 解除了 ${target.member.name} 的禁言`;
+    broadcast(room, { type: 'system', room: room.id, key, args: { name: target.member.name, by: ws.member.name }, text, ts: Date.now() });
+    pushMembers(room);
 }
 
 function handleTyping(ws, payload) {
@@ -730,6 +857,12 @@ function onMessage(ws, raw) {
             break;
         case 'rename':
             handleRename(ws, payload);
+            break;
+        case 'kick':
+            handleKick(ws, payload);
+            break;
+        case 'mute':
+            handleMute(ws, payload);
             break;
         case 'typing':
             handleTyping(ws, payload);
