@@ -2,6 +2,31 @@
 
 记录本项目将 SillyTavern 改造为多人同房聊天室的版本演进。格式参考 [Keep a Changelog](https://keepachangelog.com/)，迭代计划见 [ITERATION_PLAN.md](./ITERATION_PLAN.md)。
 
+## [SillyRoom 0.2.0] — 2026-09-07
+
+### 迭代 P1-1：真人消息进入 ST 聊天流
+
+**改动内容**
+- `plugins/sillyroom/index.mjs`（+6 行）：`handleChat` 支持可选 `kind: 'ai'` 字段——成员可把本地 AI 的回复以 `kind:'ai'` 中继广播；非 `ai` 的 kind 值一律丢弃（防伪造），消息照常入历史与限频
+- `public/scripts/extensions/sillyroom/index.js`（+95 行）：
+  - **注入**：新开关注入聊天（默认开，localStorage 持久化）。开启时，房间内**其他成员**的实时发言经 `sendMessageAsUser(text, null, null, true, senderName)` 写入当前 ST 聊天（用户侧消息、紧凑布局）；昵称写入 `mes.name`，文本补全（`formatMessageHistoryItem`）与 chat completion（`openai.js` 的 `name` 字段）都会把「昵称:」带入 prompt，AI 可区分说话人。多条并发注入经 Promise 队列串行化，避免并发存盘竞争
+  - **AI 广播**：新增「AI 回复广播」开关（默认开）。监听 `MESSAGE_RECEIVED`，仅 `type === 'normal'`（普通生成）时把本地 AI 回复截断至 2000 字符广播到房间；swipe/continue/impersonate/quiet 一律不广播。`kind:'ai'` 消息只进房间窗口（带 🤖 AI 徽标样式），**绝不回注**到任何人的 ST 聊天（防循环）
+  - 历史回放（加入房间时）不注入，只进房间窗口
+- `public/scripts/extensions/sillyroom/style.css`（+30 行）：开关行与 AI 徽标样式，全部基于 ST 主题 CSS 变量
+
+**改动原因**
+P0 完成了「真人互聊」但聊天室与 SillyTavern 本体是两个孤立世界。本迭代打通双向链路：真人发言成为 AI 上下文（AI 能看到谁说了什么），本地 AI 回复中继到房间（其他成员能看到你的 AI 怎么回）。注入复用 `sendMessageAsUser` 而非自拼消息对象，完整保留正则脚本、时间戳、token 计数、存盘与事件链路。
+
+**测试结果**
+- 服务端 Node 双客户端集成测试 6/6 通过：普通消息不带 kind（回归）、`kind:'ai'` 广播与发送者回显、非法 kind 值被清洗、迟到者历史回放含两类消息、AI 中继共享限频
+- 双浏览器窗口实测（Chromium，测试实例 :8001 / `--dataRoot data-test`）：
+  - 窗口 A 房间发言 → 窗口 B 的 ST 主聊天新增 `is_user:true`、`name=<A 昵称>` 的用户消息，文本一致（注入 ✓）
+  - B 端以 `swipe` / `normal` 两种 type 触发 `MESSAGE_RECEIVED`：仅 `normal` 广播到房间，A 端房间窗口出现带 AI 徽标的消息；`swipe` 不广播 ✓
+  - 循环防护：AI 中继消息在任何窗口的 ST 聊天中注入数为 0（接收方与发送方回显均不注入）✓
+  - 关闭 B 端「注入聊天」→ A 的发言只进房间窗口，B 聊天长度不变；开关状态 localStorage 持久化，刷新后保持 ✓
+  - 服务器日志无报错；测试服务器与测试数据目录已清理
+- 已知边界（记录为后续迭代项）：注入不会自动触发 AI 生成（用户手动点发送后 AI 才回应）；同浏览器多窗口共享昵称（localStorage 同源）
+
 ## [SillyRoom 0.1.0] — 2026-09-06
 
 ### 迭代 P0-1：服务端 WebSocket 基座（commit `246908884`）

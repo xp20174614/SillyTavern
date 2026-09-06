@@ -1,6 +1,8 @@
 // SillyRoom client extension — multi-user live chatroom over WebSocket.
 // Talks to the server plugin endpoint /api/plugins/sillyroom/ws (see plugins/sillyroom/).
 
+import { eventSource, event_types, sendMessageAsUser } from '../../../script.js';
+
 const WS_PATH = '/api/plugins/sillyroom/ws';
 const STATUS_URL = '/api/plugins/sillyroom/status';
 
@@ -9,6 +11,8 @@ const STORAGE = {
     name: 'sillyroom:name',
     room: 'sillyroom:room',
     open: 'sillyroom:windowOpen',
+    inject: 'sillyroom:inject',
+    aiBcast: 'sillyroom:aiBcast',
 };
 
 const RECONNECT_BASE_MS = 1000;
@@ -105,10 +109,14 @@ function scrollToBottom() {
 
 function appendMessage(payload) {
     const isSelf = payload.from?.clientId === selfId;
-    const row = $('<div class="sillyroom_msg"></div>').toggleClass('mine', isSelf);
+    const isAi = payload.kind === 'ai';
+    const row = $('<div class="sillyroom_msg"></div>').toggleClass('mine', isSelf).toggleClass('ai', isAi);
     const meta = $('<div class="sillyroom_msg_meta"></div>');
     const time = new Date(payload.ts ?? Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+    if (isAi) {
+        meta.append($('<span class="sillyroom_msg_badge"></span>').text('AI'));
+    }
     meta.append($('<span class="sillyroom_msg_name"></span>').css('color', payload.from?.color || '').text(payload.from?.name ?? '???'));
     meta.append($('<span class="sillyroom_msg_time"></span>').text(time));
     row.append(meta);
@@ -174,6 +182,77 @@ function sendWs(payload) {
     }
     return false;
 }
+
+// --- P1-1: room <-> ST chat flow -------------------------------------------
+
+function injectEnabled() {
+    return $('#sillyroom_inject').prop('checked');
+}
+
+function aiBcastEnabled() {
+    return $('#sillyroom_ai_bcast').prop('checked');
+}
+
+// Serializes injections so concurrent room messages can't interleave saves.
+let injectionQueue = Promise.resolve();
+
+/**
+ * Injects a live room message from ANOTHER member into the current ST chat as
+ * a user-side message attributed to the sender (compact layout). The sender
+ * name rides on mes.name, which both text-completion and chat-completion
+ * prompts prepend to the message, so the AI can tell speakers apart.
+ * @param {object} payload Room chat message (from, text)
+ */
+function injectRoomMessage(payload) {
+    if (!injectEnabled() || !joinedRoom) {
+        return;
+    }
+
+    const from = payload?.from;
+    if (!from || from.clientId === selfId) {
+        return;
+    }
+
+    const text = String(payload.text ?? '').trim();
+    if (!text) {
+        return;
+    }
+
+    injectionQueue = injectionQueue.then(async () => {
+        try {
+            await sendMessageAsUser(text, null, null, true, from.name);
+        } catch (error) {
+            console.warn('SillyRoom: failed to inject room message into chat', error);
+        }
+    });
+}
+
+/**
+ * Broadcasts a locally generated AI reply to the room. Fired on
+ * MESSAGE_RECEIVED for plain generations only — swipes, continues, impersonate
+ * and quiet/background generations stay local.
+ * @param {number} messageId Index into the current chat
+ * @param {string|undefined} type Generation type
+ */
+function onMessageReceived(messageId, type) {
+    if (type !== 'normal' || !aiBcastEnabled() || !joinedRoom) {
+        return;
+    }
+
+    const message = SillyTavern.getContext().chat?.[messageId];
+    if (!message || message.is_user || message.is_system) {
+        return;
+    }
+
+    const text = String(message.mes ?? '').trim().slice(0, MAX_MESSAGE_LENGTH);
+    if (!text) {
+        return;
+    }
+
+    sendWs({ type: 'chat', kind: 'ai', text });
+}
+
+// ---------------------------------------------------------------------------
 
 function joinRoom(room) {
     const roomCode = String(room ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'lobby';
@@ -254,6 +333,10 @@ function handleMessage(event) {
         case 'chat':
             markTyping(msg.from?.clientId, msg.from?.name, false);
             appendMessage(msg);
+            // AI relays are room-window-only; never re-inject them (loop protection)
+            if (msg.kind !== 'ai') {
+                injectRoomMessage(msg);
+            }
             break;
         case 'system':
             appendSystem(msg.text ?? '');
@@ -360,6 +443,14 @@ function buildWindow() {
                 <button id="sillyroom_leave" class="menu_button">离开</button>
             </div>
             <div id="sillyroom_rooms"></div>
+            <div id="sillyroom_toggles">
+                <label class="sillyroom_toggle" title="把其他成员的房间发言注入当前聊天（用户侧消息），AI 下次生成时可见">
+                    <input id="sillyroom_inject" type="checkbox"><span>注入聊天</span>
+                </label>
+                <label class="sillyroom_toggle" title="把本地 AI 的回复广播到房间，供其他成员查看">
+                    <input id="sillyroom_ai_bcast" type="checkbox"><span>AI 回复广播</span>
+                </label>
+            </div>
             <div id="sillyroom_members_bar">
                 <span id="sillyroom_room_label"></span>
                 <span class="sillyroom_flex"></span>
@@ -397,6 +488,18 @@ function buildWindow() {
     });
 
     $('#sillyroom_room_input').val(readStore(STORAGE.room));
+
+    // Both integrations default to ON; '0' in storage means the user opted out.
+    $('#sillyroom_inject')
+        .prop('checked', readStore(STORAGE.inject) !== '0')
+        .on('change', function () {
+            writeStore(STORAGE.inject, this.checked ? '1' : '0');
+        });
+    $('#sillyroom_ai_bcast')
+        .prop('checked', readStore(STORAGE.aiBcast) !== '0')
+        .on('change', function () {
+            writeStore(STORAGE.aiBcast, this.checked ? '1' : '0');
+        });
 
     $('#sillyroom_join').on('click', () => joinRoom($('#sillyroom_room_input').val()));
     $('#sillyroom_room_input').on('keydown', event => {
@@ -458,6 +561,9 @@ export function init() {
     menuItem.append($('<span></span>').text('聊天室'));
     menuItem.on('click', () => setWindowVisible($('#sillyroom_window').hasClass('sillyroom_hidden')));
     $('#extensionsMenu').append(menuItem);
+
+    // AI reply relay: plain generations only
+    eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
 
     // Probe the server plugin (shows a clear hint when enableServerPlugins is off)
     fetch(STATUS_URL)

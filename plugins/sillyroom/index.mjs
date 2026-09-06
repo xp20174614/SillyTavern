@@ -272,6 +272,9 @@ function handleChat(ws, payload) {
             name: ws.member.name,
             color: ws.member.color,
         },
+        // kind 'ai' marks an AI reply relayed by a member; clients must not
+        // inject it back into their own ST chat (loop protection)
+        ...(payload?.kind === 'ai' ? { kind: 'ai' } : {}),
         text,
         ts: Date.now(),
     };

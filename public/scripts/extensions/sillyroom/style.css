@@ -143,6 +143,38 @@
     background-color: var(--SmartThemeChatTintColor, rgba(255, 255, 255, 0.06));
 }
 
+#sillyroom_toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding: 0 10px 6px;
+    font-size: 0.85em;
+}
+
+.sillyroom_toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.sillyroom_toggle input {
+    margin: 0;
+}
+
+.sillyroom_msg.ai {
+    border: 1px dashed var(--SmartThemeBorderColor, #3a3d44);
+}
+
+.sillyroom_msg_badge {
+    font-size: 0.75em;
+    font-weight: 700;
+    padding: 0 5px;
+    border-radius: 8px;
+    background-color: var(--SmartThemeChatTintColor, rgba(255, 255, 255, 0.12));
+}
+
 #sillyroom_members_bar {
     display: flex;
     align-items: center;
