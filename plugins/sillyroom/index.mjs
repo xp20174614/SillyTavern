@@ -134,6 +134,18 @@ function sanitizeColor(value, fallbackSeed) {
     return NAME_COLORS[hash % NAME_COLORS.length];
 }
 
+/**
+ * P2-2: opaque delivery-correlation token echoed back with the broadcast so a
+ * client can match its own offline-queued sends to the confirmed copy.
+ */
+function sanitizeNonce(value) {
+    if (typeof value !== 'string') {
+        return null;
+    }
+    const cleaned = value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+    return cleaned || null;
+}
+
 function send(ws, payload) {
     if (ws && ws.readyState === ws.OPEN) {
         try {
@@ -426,6 +438,10 @@ function handleChat(ws, payload) {
         return;
     }
 
+    // P2-2: echo the caller's nonce so offline-queued messages can be matched
+    // to their server confirmation (delivery acknowledgment, not security)
+    const nonce = sanitizeNonce(payload?.nonce);
+
     const message = {
         id: newMessageId(),
         room: ws.room.id,
@@ -437,6 +453,7 @@ function handleChat(ws, payload) {
         // kind 'ai' marks an AI reply relayed by a member; clients must not
         // inject it back into their own ST chat (loop protection)
         ...(payload?.kind === 'ai' ? { kind: 'ai' } : {}),
+        ...(nonce ? { nonce } : {}),
         text,
         ts: Date.now(),
     };

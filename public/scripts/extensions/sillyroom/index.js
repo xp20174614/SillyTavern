@@ -26,6 +26,9 @@ const MAX_MESSAGE_LENGTH = 2000;
 const AUTO_RESPOND_IDLE_MS = 3000;
 const AUTO_RESPOND_COOLDOWN_MS = 15000;
 const AUTO_RESPOND_BUSY_RETRIES = 2;
+// P2-2 offline outbox: capped at the server's rate limit (15 per 5s) so a
+// full flush after reconnect is never throttled or dropped.
+const MAX_OUTBOX = 15;
 
 /** @type {WebSocket|null} */
 let ws = null;
@@ -47,6 +50,15 @@ let lastAutoRespondAt = 0;
 let serverSuggestedName = null;
 let loginRequired = false;
 let connectInFlight = false;
+// P2-2 offline catch-up state: messages typed while the socket is down are
+// buffered here and flushed once the room is rejoined.
+/** @type {Array<{room: string, text: string, nonce: string, ts: number}>} */
+let outbox = [];
+let unreadCount = 0;
+// P2-2 gap marker: id of the last chat message seen before a disconnect, so
+// the replay after rejoining can show where the offline catch-up begins.
+let lastSeenMessageId = null;
+let reconnectGap = null;
 
 function readStore(key, fallback = '') {
     try {
@@ -150,6 +162,107 @@ function appendSystem(text) {
     scrollToBottom();
 }
 
+// --- P2-2: offline catch-up (outbox, gap marker, unread badge) --------------
+
+function newNonce() {
+    return `q${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Renders the divider that marks where messages received while disconnected
+ * begin in the replayed history.
+ */
+function appendGapSeparator() {
+    $('#sillyroom_messages').append(
+        $('<div class="sillyroom_gap"></div>').text('—— 断线期间的新消息 ——'),
+    );
+}
+
+function appendPendingRow(item) {
+    const row = $('<div class="sillyroom_msg pending"></div>').attr('data-nonce', item.nonce);
+    row.append($('<div class="sillyroom_msg_meta"></div>').append(
+        $('<span class="sillyroom_msg_time"></span>').text('⏳ 待发送'),
+    ));
+    row.append($('<div class="sillyroom_msg_text"></div>').text(item.text));
+    $('#sillyroom_messages').append(row);
+    scrollToBottom();
+}
+
+/**
+ * Re-renders every buffered message as a pending row; called after the joined
+ * replay wipes and rebuilds the message box, before the outbox is flushed.
+ */
+function renderOutbox() {
+    for (const item of outbox) {
+        appendPendingRow(item);
+    }
+}
+
+/**
+ * Sends all buffered messages for the current room. Items stay rendered as
+ * ⏳ rows until the server echoes them back with the matching nonce
+ * (consumeOutboxNonce), which swaps the pending copy for the confirmed one.
+ */
+function flushOutbox() {
+    if (!joinedRoom || outbox.length === 0) {
+        return;
+    }
+
+    for (const item of [...outbox]) {
+        if (item.room !== joinedRoom) {
+            outbox.splice(outbox.indexOf(item), 1);
+            $(`#sillyroom_messages .sillyroom_msg[data-nonce="${item.nonce}"]`).remove();
+            appendSystem('[错误] 一条离线消息未发送：房间已切换');
+            continue;
+        }
+        if (!sendWs({ type: 'chat', text: item.text, nonce: item.nonce })) {
+            break; // socket dropped again — keep everything for the next reconnect
+        }
+        outbox.splice(outbox.indexOf(item), 1);
+    }
+    updateRoomControls();
+}
+
+/**
+ * Matches a server echo to a buffered message: drops the pending row (the
+ * confirmed copy is appended right after) and the outbox entry. The row goes
+ * even when the entry is already gone — flushOutbox removes entries at send
+ * time to avoid double-flushing, so the echo is the only cleanup signal left.
+ */
+function consumeOutboxNonce(nonce) {
+    const index = outbox.findIndex(item => item.nonce === nonce);
+    if (index >= 0) {
+        outbox.splice(index, 1);
+    }
+    $(`#sillyroom_messages .sillyroom_msg[data-nonce="${nonce}"]`).remove();
+    updateRoomControls();
+}
+
+function renderUnread() {
+    const badge = $('#sillyroom_unread');
+    if (unreadCount > 0) {
+        badge.text(unreadCount > 99 ? '99+' : String(unreadCount)).addClass('visible');
+    } else {
+        badge.removeClass('visible').text('');
+    }
+}
+
+/**
+ * Counts messages received while the chatroom window is minimized. The badge
+ * lives on the wand-menu entry (the only visible element while minimized);
+ * one toastr notice fires when the unread burst starts.
+ */
+function bumpUnread() {
+    if (!$('#sillyroom_window').hasClass('sillyroom_hidden')) {
+        return;
+    }
+    unreadCount += 1;
+    renderUnread();
+    if (unreadCount === 1) {
+        toastr.info('聊天室有新消息，可通过魔杖菜单「💬 聊天室」查看', '聊天室');
+    }
+}
+
 function renderTyping() {
     const names = [...typingUsers.values()].map(t => t.name);
     const label = $('#sillyroom_typing');
@@ -183,12 +296,23 @@ function markTyping(clientId, name, active) {
 
 function updateRoomControls() {
     const hasRoom = !!joinedRoom;
+    // P2-2: with a stored room an auto-rejoin is expected, so the input stays
+    // usable while disconnected and sends are buffered in the outbox.
+    const expectRejoin = !hasRoom && !!readStore(STORAGE.room);
+    const canChat = hasRoom || expectRejoin;
+    const pendingNote = outbox.length ? ` · 待补发 ${outbox.length} 条` : '';
     $('#sillyroom_join').toggle(!hasRoom);
     $('#sillyroom_leave').toggle(hasRoom);
     $('#sillyroom_room_input').prop('disabled', hasRoom);
-    $('#sillyroom_input').prop('disabled', !hasRoom);
-    $('#sillyroom_send').prop('disabled', !hasRoom);
-    $('#sillyroom_room_label').text(hasRoom ? `房间：${joinedRoom}` : '未加入房间');
+    $('#sillyroom_input').prop('disabled', !canChat);
+    $('#sillyroom_send').prop('disabled', !canChat);
+    $('#sillyroom_room_label').text(
+        hasRoom
+            ? `房间：${joinedRoom}${pendingNote}`
+            : expectRejoin
+                ? `房间：${readStore(STORAGE.room)}（等待重连）${pendingNote}`
+                : '未加入房间',
+    );
     $('#sillyroom_member_count').text(hasRoom ? String(members.size) : '0');
 }
 
@@ -359,6 +483,10 @@ function joinRoom(room) {
 function leaveRoom(notifyServer = true) {
     if (notifyServer) {
         sendWs({ type: 'leave' });
+        // Intentional leave drops the outbox with the room; an accidental
+        // disconnect (notifyServer=false) keeps it for the auto-rejoin flush.
+        outbox.length = 0;
+        $('#sillyroom_messages .sillyroom_msg.pending').remove();
     }
     joinedRoom = null;
     members.clear();
@@ -414,11 +542,36 @@ function handleMessage(event) {
             joinedRoom = msg.room;
             selfId = msg.self?.clientId ?? null;
             members = new Map((msg.members ?? []).map(m => [m.clientId, m]));
+            const history = Array.isArray(msg.history) ? msg.history : [];
             $('#sillyroom_messages').empty();
             appendSystem(`已加入房间 ${msg.room}`);
-            for (const item of msg.history ?? []) {
-                appendMessage(item);
+            // P2-2: locate where the offline catch-up begins in the replay —
+            // right after the last message seen before the disconnect, or (if
+            // that message aged out of the history window) at the first
+            // message sent after the disconnect timestamp.
+            let gapIndex = -1;
+            if (reconnectGap) {
+                const afterIdx = reconnectGap.afterId
+                    ? history.findIndex(item => item?.id === reconnectGap.afterId)
+                    : -1;
+                if (afterIdx >= 0) {
+                    gapIndex = afterIdx + 1 <= history.length - 1 ? afterIdx + 1 : -1;
+                } else {
+                    gapIndex = history.findIndex(item => (item?.ts ?? 0) > reconnectGap.at);
+                }
             }
+            history.forEach((item, index) => {
+                if (index === gapIndex) {
+                    appendGapSeparator();
+                }
+                appendMessage(item);
+            });
+            if (history.length) {
+                lastSeenMessageId = history[history.length - 1]?.id ?? lastSeenMessageId;
+            }
+            reconnectGap = null;
+            renderOutbox();
+            flushOutbox();
             renderMembers();
             updateRoomControls();
             setStatus('已连接', 'ok');
@@ -439,7 +592,18 @@ function handleMessage(event) {
             break;
         case 'chat':
             markTyping(msg.from?.clientId, msg.from?.name, false);
+            // P2-2: our own flushed outbox message — drop the ⏳ pending copy,
+            // the confirmed echo below replaces it
+            if (msg.nonce) {
+                consumeOutboxNonce(msg.nonce);
+            }
             appendMessage(msg);
+            if (msg.id) {
+                lastSeenMessageId = msg.id;
+            }
+            if (msg.from?.clientId !== selfId) {
+                bumpUnread();
+            }
             // AI relays are room-window-only; never re-inject them (loop protection)
             if (msg.kind !== 'ai') {
                 injectRoomMessage(msg);
@@ -540,6 +704,8 @@ async function connect() {
 
         ws.onclose = () => {
             if (joinedRoom) {
+                // P2-2: remember where the replay catch-up marker should go
+                reconnectGap = { afterId: lastSeenMessageId, at: Date.now() };
                 leaveRoom(false);
             }
             setStatus('连接已断开', 'error');
@@ -561,15 +727,30 @@ async function connect() {
 function sendCurrentInput() {
     const input = $('#sillyroom_input');
     const text = String(input.val() ?? '').trim();
+    // P2-2: while disconnected the stored room is where the auto-rejoin will
+    // land, so sends targeting it are buffered instead of rejected.
+    const expectedRoom = joinedRoom ?? (readStore(STORAGE.room) || null);
 
-    if (!text || !joinedRoom) {
+    if (!text || !expectedRoom) {
         return;
     }
 
-    if (sendWs({ type: 'chat', text })) {
+    if (joinedRoom && sendWs({ type: 'chat', text })) {
         input.val('').trigger('focus');
         sendWs({ type: 'typing', active: false });
+        return;
     }
+
+    if (outbox.length >= MAX_OUTBOX) {
+        appendSystem(`[错误] 离线消息缓存已满（${MAX_OUTBOX} 条），请等待重连后再发送`);
+        return;
+    }
+
+    const item = { room: expectedRoom, text, nonce: newNonce(), ts: Date.now() };
+    outbox.push(item);
+    appendPendingRow(item);
+    input.val('').trigger('focus');
+    updateRoomControls();
 }
 
 function buildWindow() {
@@ -699,6 +880,9 @@ function setWindowVisible(visible) {
     const windowEl = $('#sillyroom_window');
     if (visible) {
         windowEl.removeClass('sillyroom_hidden');
+        // P2-2: opening the window acknowledges everything buffered while minimized
+        unreadCount = 0;
+        renderUnread();
         $('#sillyroom_name_display').text(getName());
         connect();
         scrollToBottom();
@@ -719,6 +903,8 @@ export function init() {
     const menuItem = $('<a id="sillyroom_menu_item" class="list-group-item flex-container flexGap5 interactable" tabindex="0" title="打开多人聊天室"></a>');
     menuItem.append($('<span></span>').text('💬'));
     menuItem.append($('<span></span>').text('聊天室'));
+    // P2-2: unread badge, shown while the chatroom window is minimized
+    menuItem.append($('<span id="sillyroom_unread" class="sillyroom_unread"></span>'));
     menuItem.on('click', () => setWindowVisible($('#sillyroom_window').hasClass('sillyroom_hidden')));
     $('#extensionsMenu').append(menuItem);
 

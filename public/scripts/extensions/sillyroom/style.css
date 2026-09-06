@@ -240,6 +240,44 @@
     background-color: var(--SmartThemeBlurTintColor, rgba(80, 120, 200, 0.15));
 }
 
+/* P2-2: buffered while offline, waiting for the reconnect flush */
+.sillyroom_msg.pending {
+    opacity: 0.55;
+    border: 1px dashed var(--SmartThemeBorderColor, #3a3d44);
+}
+
+.sillyroom_msg.pending .sillyroom_msg_meta {
+    font-style: italic;
+}
+
+/* P2-2: divider marking messages that arrived during a disconnect */
+.sillyroom_gap {
+    align-self: center;
+    font-size: 0.78em;
+    opacity: 0.6;
+    text-align: center;
+    padding: 1px 4px;
+}
+
+/* P2-2: unread counter on the wand-menu entry while the window is minimized */
+.sillyroom_unread {
+    display: none;
+    min-width: 16px;
+    margin-left: auto;
+    padding: 0 5px;
+    border-radius: 9px;
+    background-color: var(--crimson, #e5424d);
+    color: #fff;
+    font-size: 0.8em;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+}
+
+.sillyroom_unread.visible {
+    display: inline-block;
+}
+
 .sillyroom_msg_meta {
     display: flex;
     gap: 6px;
