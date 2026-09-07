@@ -24,6 +24,24 @@
     display: none;
 }
 
+/* P2-4: enlarged, centered layout — the default when the window opens;
+   the header ⛶/❐ button toggles back to the compact docked corner */
+#sillyroom_window.sillyroom_large {
+    left: 50%;
+    top: 50%;
+    right: auto;
+    bottom: auto;
+    transform: translate(-50%, -50%);
+    width: min(720px, 94vw);
+    height: min(78vh, 760px);
+    font-size: calc(var(--fontSizeBase, 15px) * 0.95);
+}
+
+/* wide window reads better with narrower chat bubbles */
+#sillyroom_window.sillyroom_large .sillyroom_msg {
+    max-width: 78%;
+}
+
 #sillyroom_header {
     display: flex;
     align-items: center;
@@ -117,9 +135,11 @@
 }
 
 #sillyroom_controls .menu_button,
-#sillyroom_input_row .menu_button {
+#sillyroom_input_row .menu_button,
+#sillyroom_toggles .menu_button {
     padding: 4px 10px;
     flex-shrink: 0;
+    white-space: nowrap; /* CJK labels must never stack vertically */
 }
 
 #sillyroom_rooms {

@@ -2,6 +2,37 @@
 
 记录本项目将 SillyTavern 改造为多人同房聊天室的版本演进。格式参考 [Keep a Changelog](https://keepachangelog.com/)，迭代计划见 [ITERATION_PLAN.md](./ITERATION_PLAN.md)。
 
+## [SillyRoom 0.11.0] — 2026-09-07
+
+### 迭代 P2-4：界面放大居中与一键操作
+
+**改动内容**（纯前端，服务端零改动）
+- `public/scripts/extensions/sillyroom/index.js`（+约 110 行）：
+  - **放大居中**：新增 `sillyroom_large` 窗口状态——默认放大居中（`min(720px, 94vw)` × `min(78vh, 760px)`，绝对居中），头部新增 ⛶/❐ 切换按钮（大窗显示 ❐ 还原、小窗显示 ⛶ 放大），偏好写 `sillyroom:large` localStorage（默认大窗，键不存在即视为大窗），刷新后保持
+  - **一键邀请**：成员栏新增 ✉ 按钮（仅加入房间后显示）——组装「地址（`location.origin`）+ 房间码 + 密码（有锁时）」邀请文本复制到剪贴板：`navigator.clipboard` 优先（127.0.0.1/HTTPS 为安全上下文），拒绝时降级隐藏 textarea + `execCommand('copy')` 适配 HTTP 局域网，两者都失败弹 `window.prompt` 供手动复制；成功 toastr 展示邀请全文
+  - **一键 AI 加入**：控制行新增「🤖 AI 加入」按钮——一键同步开启「注入聊天 / AI 回复广播 / 自动回应」三开关（写入各自 localStorage），再次点击全部关闭并撤销挂起的自动回应定时器；按钮文案随状态切换（🤖 AI 加入 ⇄ 🤖 移除 AI），三个复选框手动改动时按钮文案实时跟随；开启时若未选择角色（`getContext().characterId == null`）toastr 提示先选角色
+- `public/scripts/extensions/sillyroom/style.css`（+约 22 行）：`.sillyroom_large` 布局（居中定位覆盖小窗默认停靠坐标、宽高上限、字号微调 0.95 倍），大窗下气泡 `max-width: 78%`（宽窗可读性）；控制行按钮 `white-space: nowrap` 防 CJK 文案竖排
+- `public/scripts/extensions/sillyroom/locales.js`（+10 键 × 2 语言）：en/zh-tw 词典覆盖全部新文案（切换按钮 tooltip、邀请成功/失败提示、邀请模板、AI 加入按钮两种文案、按钮 tooltip、未选角色提示）
+
+**改动原因**
+用户需求（P2-4）：小窗停靠角落对多人聊天信息密度不足，希望默认大窗获得完整聊天体验；邀请朋友进房需要口头转述地址/房间码/密码三样信息，容易漏；让本地 AI 参与房间需要手动勾选三个分散的开关，认知负担高。三项均为纯展示/交互层增强，不触碰协议与服务端。
+
+**测试结果**
+- `node --check` 通过（扩展/词典/插件三文件）；`t` 模板标签键（`${0}` 占位符约定）与词典逐一比对匹配
+- 服务端正常启动（测试实例 :8001 / `--dataRoot data-test`，插件加载、status 接口正常）
+- **双浏览器窗口实测**（界面语言 en，全程 JS error 钩子捕获 0 错误）：
+  - **大窗默认**：首窗打开即 `sillyroom_large`，几何验证 720×702 在 1440×900 视口精确居中（|偏差| < 8px）；截图确认布局完整（头部/开关行/成员栏/消息流/输入行均无遮挡错位）
+  - **大小切换**：点 ❐ 变紧凑小窗（340px 停靠、按钮变 ⛶、localStorage `large=0`）→ 刷新后仍为紧凑（偏好持久化 ✓，且窗口开合状态、房间、自动重连均保持）→ 点 ⛶ 恢复大窗（`large=1`）
+  - **一键邀请**：加入 `p24test` 后 ✉ 出现；点击 → 剪贴板复制成功，toast「Invite copied…」+ 邀请全文（地址 + 房间码，**无密码时密码段正确省略**）；无阻塞对话框、无报错
+  - **一键 AI 加入**：点击 → 三开关同时勾选 + localStorage 三键全 `1`、按钮变「🤖 Remove AI」、toastr 提示「Select a character first so the AI can join the chat」（测试数据目录无角色，符合预期）；再点 → 三开关全关、localStorage 全 `0`、按钮复原
+  - **多人回归**：A/B 两窗口共享存储、各自独立 clientId——B 打开后自动大窗、自动重连 `p24test`、成员数 2（A 为 👑 房主带 🔓/✉，B 无锁按钮）；A 发消息 B 实时收到、B 回消息 A 实时收到（发送者昵称/时间正确，自己/他人气泡样式区分）；房间建议 chips 正常
+- 测试服务器与 `data-test/`、测试标签页均已清理
+
+**已知边界（记录为后续迭代项）**
+- 放大居中为固定尺寸（非拖拽自由缩放）；如需任意尺寸需引入拖拽手柄，工作量另计
+- `window.prompt` 兜底（剪贴板完全不可用时）为原生弹窗，样式不随主题（与 P3-1b 密码 prompt 同一遗留项，P4 备选统一换应用内模态框）
+- 「AI 加入」开启自动回应消耗 API 配额的既有警示仍只在自动回应开关 tooltip 中；按钮 tooltip 已注明行为，但未弹二次确认（与三开关手动开启行为一致，视为已知情操作）
+
 ## [SillyRoom 0.10.0] — 2026-09-07
 
 ### 迭代 P3-1b：房间密码

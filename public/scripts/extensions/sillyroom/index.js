@@ -16,6 +16,7 @@ const STORAGE = {
     inject: 'sillyroom:inject',
     aiBcast: 'sillyroom:aiBcast',
     autoRespond: 'sillyroom:autoRespond',
+    large: 'sillyroom:large',
 };
 // P3-1b: the join password is kept per room so an auto-rejoin (reconnect or
 // refresh) resends it without prompting. Plaintext like every other
@@ -419,6 +420,8 @@ function updateRoomControls() {
                 : t`未加入房间`,
     );
     $('#sillyroom_member_count').text(hasRoom ? String(members.size) : '0');
+    // P2-4: inviting only makes sense with a room to invite into
+    $('#sillyroom_invite').toggle(canChat);
     // P3-1b: the owner's lock control appears in the members bar; the glyph
     // and tooltip track the room's current lock state
     $('#sillyroom_lock')
@@ -634,6 +637,96 @@ function handleLockClick() {
         storePassword(joinedRoom, '');
         sendWs({ type: 'setpass' });
     }
+}
+
+// --- P2-4: one-click actions (invite friend / add the local AI) -------------
+
+/**
+ * Copies text to the clipboard. navigator.clipboard needs a secure context,
+ * so plain-HTTP LAN access falls back to the legacy execCommand path.
+ * @param {string} text Text to copy
+ * @returns {Promise<boolean>} Whether a copy method reported success
+ */
+async function copyText(text) {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch {
+        try {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            const ok = document.execCommand('copy');
+            area.remove();
+            return ok;
+        } catch {
+            return false;
+        }
+    }
+}
+
+/**
+ * Builds the invite text (server address + room code + password when set) and
+ * copies it, so sharing the room is a single click. On total clipboard failure
+ * the text is shown in a prompt for manual copying.
+ */
+async function inviteToRoom() {
+    const room = joinedRoom ?? readStore(STORAGE.room);
+    if (!room) {
+        return;
+    }
+
+    const password = storedPassword(room);
+    const invite = t`来 SillyTavern 聊天室聊天！地址：${location.origin}，房间码：${room}${password ? t`，密码：${password}` : ''}`;
+    const copied = await copyText(invite);
+    if (copied) {
+        toastr.success(invite, t`邀请信息已复制，发给朋友即可`);
+    } else {
+        window.prompt(t`复制失败，请手动复制邀请信息：`, invite);
+    }
+}
+
+/** True when all three AI-participation switches are on. */
+function aiJoined() {
+    return injectEnabled() && aiBcastEnabled() && autoRespondEnabled();
+}
+
+function updateAiJoinButton() {
+    $('#sillyroom_ai_join').text(aiJoined() ? `🤖 ${t`移除 AI`}` : `🤖 ${t`AI 加入`}`);
+}
+
+/**
+ * One click to let the local AI take part in the room: inject member messages,
+ * relay AI replies and auto-respond — or click again to switch all three off.
+ */
+function toggleAiJoin() {
+    const enable = !aiJoined();
+    for (const [selector, key] of [
+        ['#sillyroom_inject', STORAGE.inject],
+        ['#sillyroom_ai_bcast', STORAGE.aiBcast],
+        ['#sillyroom_auto_respond', STORAGE.autoRespond],
+    ]) {
+        $(selector).prop('checked', enable);
+        writeStore(key, enable ? '1' : '0');
+    }
+    if (enable) {
+        if (SillyTavern.getContext()?.characterId == null) {
+            toastr.info(t`请先选择一个角色，AI 才能加入聊天`, t`聊天室`);
+        }
+    } else {
+        cancelAutoRespond();
+    }
+    updateAiJoinButton();
+}
+
+// P2-4: enlarged centered window (default) vs the compact docked corner
+function applyWindowSize() {
+    const large = readStore(STORAGE.large) !== '0';
+    $('#sillyroom_window').toggleClass('sillyroom_large', large);
+    $('#sillyroom_resize').text(large ? '❐' : '⛶');
 }
 
 function joinRoom(room, password) {
@@ -1021,6 +1114,7 @@ function buildWindow() {
             <span id="sillyroom_status_dot" class="connecting"></span>
             <span id="sillyroom_status"></span>
             <span class="sillyroom_flex"></span>
+            <a id="sillyroom_resize" class="sillyroom_icon" href="javascript:void(0)" title="放大/还原" data-i18n="[title]放大/还原">⛶</a>
             <a id="sillyroom_minimize" class="sillyroom_icon" href="javascript:void(0)" title="收起" data-i18n="[title]收起">—</a>
         </div>
         <div id="sillyroom_body">
@@ -1041,10 +1135,12 @@ function buildWindow() {
                 <label class="sillyroom_toggle" title="注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上" data-i18n="[title]注入真人消息后自动触发一次 AI 生成（需开启「注入聊天」）；3 秒合并连续发言、15 秒冷却节流，防止请求风暴。多人时建议只开在一台设备上">
                     <input id="sillyroom_auto_respond" type="checkbox"><span data-i18n="自动回应">自动回应</span>
                 </label>
+                <button id="sillyroom_ai_join" class="menu_button" title="一键让本地 AI 参与房间聊天：注入真人发言 + 广播 AI 回复 + 自动回应（再次点击全部关闭）" data-i18n="[title]一键让本地 AI 参与房间聊天：注入真人发言 + 广播 AI 回复 + 自动回应（再次点击全部关闭）">🤖 AI 加入</button>
             </div>
             <div id="sillyroom_members_bar">
                 <span id="sillyroom_room_label"></span>
                 <a id="sillyroom_lock" class="sillyroom_icon" href="javascript:void(0)" style="display:none" title="设置房间密码" data-i18n="[title]设置房间密码">🔒</a>
+                <a id="sillyroom_invite" class="sillyroom_icon" href="javascript:void(0)" style="display:none" title="复制邀请信息发给朋友" data-i18n="[title]复制邀请信息发给朋友">✉</a>
                 <span class="sillyroom_flex"></span>
                 <span id="sillyroom_members"></span>
             </div>
@@ -1086,11 +1182,13 @@ function buildWindow() {
         .prop('checked', readStore(STORAGE.inject) !== '0')
         .on('change', function () {
             writeStore(STORAGE.inject, this.checked ? '1' : '0');
+            updateAiJoinButton();
         });
     $('#sillyroom_ai_bcast')
         .prop('checked', readStore(STORAGE.aiBcast) !== '0')
         .on('change', function () {
             writeStore(STORAGE.aiBcast, this.checked ? '1' : '0');
+            updateAiJoinButton();
         });
     // Auto-respond defaults to OFF: it spends API quota on its own and only
     // makes sense as an explicit opt-in (spec: 可选开关).
@@ -1101,7 +1199,11 @@ function buildWindow() {
             if (!this.checked) {
                 cancelAutoRespond();
             }
+            updateAiJoinButton();
         });
+    // P2-4: one-click AI participation mirrors the three switches above
+    updateAiJoinButton();
+    $('#sillyroom_ai_join').on('click', toggleAiJoin);
 
     $('#sillyroom_join').on('click', () => joinRoom($('#sillyroom_room_input').val()));
     $('#sillyroom_room_input').on('keydown', event => {
@@ -1122,6 +1224,14 @@ function buildWindow() {
     });
 
     $('#sillyroom_lock').on('click', handleLockClick);
+    // P2-4: one-click invite + window size toggle
+    $('#sillyroom_invite').on('click', inviteToRoom);
+    $('#sillyroom_resize').on('click', () => {
+        const large = !$('#sillyroom_window').hasClass('sillyroom_large');
+        writeStore(STORAGE.large, large ? '1' : '0');
+        applyWindowSize();
+    });
+    applyWindowSize();
 
     $('#sillyroom_send').on('click', sendCurrentInput);
     $('#sillyroom_input').on('keydown', event => {

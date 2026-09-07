@@ -30,6 +30,7 @@
 |------|------|------|
 | [已完成] | **P2-1 房间历史持久化** | 房间消息落盘到 `data/sillyroom/rooms/<roomId>.json`（共享目录——房间为账号无关实体，非每用户目录），1.5s 防抖合并写入 + 房间清空立即写入 + 优雅关停同步刷新（原子写 tmp+rename）；加入内存中不存在的房间时预载磁盘最近 50 条，复用现有回放链路，前端零改动；损坏文件静默降级 |
 | [已完成] | **P2-2 离线补发与未读** | 断线期间消息缓存补发；窗口最小化时未读角标 |
+| [已完成] | **P2-4 界面放大居中与一键操作** | 用户需求：①聊天室窗口默认放大居中（约 720px×78vh，头部 ⛶/❐ 可切回紧凑小窗，偏好 localStorage 持久化）；②一键邀请——✉ 按钮复制「服务器地址+房间码+密码」邀请文本到剪贴板（navigator.clipboard 优先、execCommand 降级适配 HTTP 局域网，失败弹 prompt 供手动复制）；③一键 AI 加入——「🤖 AI 加入」按钮同时开启注入聊天/AI 回复广播/自动回应三开关（再点全关，文案随状态切换），未选角色 toastr 提示；纯前端改动（扩展 index.js/style.css/locales.js），服务端零改动 |
 | [已完成] | **P2-3 主题与 i18n 打磨** | 前端全部 UI 文案接入 ST 翻译体系：静态界面用 `data-i18n`（含 `[title]`/`[placeholder]` 属性键），动态文案用 `t` 模板标签；扩展自带词典 `locales.js`（en / zh-tw，键为中文源串，经 `addLocaleData` 注册，未覆盖语言回退中文原文）；服务端 system/error 消息附稳定 `key` + `args`（保留原中文 `text`/`message` 作为回退），客户端按 key 本地化渲染。CSS 配色全部走 ST 主题变量：状态灯 `--active/--golden/--warning`、气泡 `--SmartThemeBotMes/UserMesBlurTintColor`（修复默认主题下「我方」气泡与窗口同色不可辨）、阴影 `--SmartThemeShadowColor`、chip 徽标改 `color-mix(BodyColor)` 保证任意主题对比度 |
 
 ## P3 增强功能
